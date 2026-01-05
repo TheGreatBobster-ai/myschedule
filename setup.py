@@ -16,12 +16,16 @@ def read(*paths: str, **kwargs: Any) -> str:
 
 
 def read_requirements(path: str) -> list:
-    return [line.strip() for line in read(path).split("\n") if not line.startswith(('"', "#", "-", "git+"))]
+    return [
+        line.strip()
+        for line in read(path).split("\n")
+        if not line.startswith(('"', "#", "-", "git+"))
+    ]
 
 
 setup(
-    name="project_name",
-    version=read("project_name", "VERSION"),
+    name="myschedule",
+    version=read("myschedule", "VERSION"),
     description="project_description",
     url="https://github.com/author_name/project_urlname/",
     long_description=read("README.md"),
@@ -29,6 +33,6 @@ setup(
     author="author_name",
     packages=find_packages(exclude=["tests", ".github"]),
     install_requires=read_requirements("requirements.txt"),
-    entry_points={"console_scripts": ["project_name = project_name.__main__:main"]},
+    entry_points={"console_scripts": ["myschedule = myschedule.__main__:main"]},
     extras_require={"test": read_requirements("requirements-test.txt")},
 )

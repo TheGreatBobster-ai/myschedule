@@ -1,0 +1,22 @@
+[
+  {
+    "course_id": "FS261110",
+    "title": "Public Economics",
+    "semester": "Frühjahrssemester 2026",
+    "type": "Vorlesung",
+    "instructors": ["Prof. Dr. Christoph A. Schaltegger"],
+    "department": "Wirtschaftswissenschaften",
+    "study_level": "Master",
+    "source_url": "https://example.com/FS261110"
+  },
+  {
+    "course_id": "FS261059",
+    "title": "Corporate Finance",
+    "semester": "Frühjahrssemester 2026",
+    "type": "Vorlesung",
+    "instructors": ["Prof. Dr. oec. Beat Affolter", "Prof. Dr. Mehdi Mostowfi"],
+    "department": "Wirtschaftswissenschaften",
+    "study_level": "Master",
+    "source_url": "https://example.com/FS261059"
+  }
+]

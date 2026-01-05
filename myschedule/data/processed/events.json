@@ -1,0 +1,24 @@
+[
+  {
+    "event_id": "FS261110__2026-02-19T10:15",
+    "course_id": "FS261110",
+    "title": "Public Economics",
+    "kind": "lecture",
+    "date": "2026-02-19",
+    "start": "10:15",
+    "end": "12:00",
+    "location": "HS 8",
+    "note": null
+  },
+  {
+    "event_id": "FS261059__2026-02-18T16:15",
+    "course_id": "FS261059",
+    "title": "Corporate Finance",
+    "kind": "lecture",
+    "date": "2026-02-18",
+    "start": "16:15",
+    "end": "20:00",
+    "location": "E.508",
+    "note": null
+  }
+]
