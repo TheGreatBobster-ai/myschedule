@@ -1,7 +1,9 @@
-# Byte-compiled / optimized / DLL files
+# Byte-compiled / optimized / DLL files / Raw data
 __pycache__/
 *.py[cod]
 *$py.class
+myschedule/data/raw/*.html
+
 
 # C extensions
 *.so
