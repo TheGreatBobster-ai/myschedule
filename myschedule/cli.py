@@ -237,14 +237,10 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_cmd_export(args, events_by_course_id))
 
     if args.command == "interactive":
-        from myschedule.interactive import Indexes, run_interactive
+        from myschedule.interactive import run_interactive, build_indexes
 
-        indexes = Indexes(
-            courses=courses,
-            course_by_id=course_by_id,
-            events_by_course_id=events_by_course_id,
-        )
-        run_interactive(indexes)
+        indexes = build_indexes()
+        run_interactive(indexes, rebuild_indexes_fn=build_indexes)
         raise SystemExit(0)
 
     raise SystemExit(2)

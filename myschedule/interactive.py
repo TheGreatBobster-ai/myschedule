@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+import time
+from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
-from typing import Any, Iterable
+from datetime import datetime, date
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 from myschedule.conflicts import find_conflicts
 from myschedule.export_ics import export_events_to_ics
 from myschedule.storage import load_selected_course_ids, save_selected_course_ids
 
-
-# ---- Optional rich support (auto fallback) ----
+# Optional rich
 try:
     from rich.console import Console
     from rich.table import Table
     from rich import box
+    from rich.progress import Progress, BarColumn, TimeRemainingColumn, TextColumn
 
     HAS_RICH = True
     console = Console()
@@ -22,16 +28,160 @@ except Exception:  # pragma: no cover
     console = None
 
 
+PACKAGE_DIR = Path(__file__).resolve().parent
+PROCESSED_DIR = PACKAGE_DIR / "data" / "processed"
+RAW_DIR = PACKAGE_DIR / "data" / "raw"
+META_PATH = PROCESSED_DIR / "metadata.json"
+
+
+@dataclass
+class Indexes:
+    courses: list[dict[str, Any]]
+    course_by_id: dict[str, dict[str, Any]]
+    events_by_course_id: dict[str, list[dict[str, Any]]]
+
+
+def _println(msg: str = "") -> None:
+    if HAS_RICH:
+        console.print(msg)
+    else:
+        print(msg)
+
+
+def _prompt(msg: str) -> str:
+    if HAS_RICH:
+        return console.input(msg)
+    return input(msg)
+
+
 def _safe_str(x: Any) -> str:
     return "" if x is None else str(x)
 
 
-def _parse_date(d: str) -> date:
-    return datetime.strptime(d, "%Y-%m-%d").date()
+def _load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _event_sort_key(ev: dict[str, Any]) -> tuple[str, str]:
-    return (_safe_str(ev.get("date")), _safe_str(ev.get("start")))
+def build_indexes() -> Indexes:
+    courses_path = PROCESSED_DIR / "courses.json"
+    events_path = PROCESSED_DIR / "events.json"
+
+    courses_raw = _load_json(courses_path)
+    events_raw = _load_json(events_path)
+
+    courses: list[dict[str, Any]] = list(courses_raw) if isinstance(courses_raw, list) else []
+    events: list[dict[str, Any]] = list(events_raw) if isinstance(events_raw, list) else []
+
+    course_by_id: dict[str, dict[str, Any]] = {}
+    for c in courses:
+        cid = _safe_str(c.get("course_id")).strip().upper()
+        if cid:
+            course_by_id[cid] = c
+
+    events_by_course_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for e in events:
+        cid = _safe_str(e.get("course_id")).strip().upper()
+        if cid:
+            events_by_course_id[cid].append(e)
+
+    return Indexes(courses=courses, course_by_id=course_by_id, events_by_course_id=events_by_course_id)
+
+
+def _read_metadata() -> dict[str, Any]:
+    if not META_PATH.exists():
+        return {}
+    try:
+        return json.loads(META_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_metadata(semester: str, courses_count: int, events_count: int) -> None:
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    data = {
+        "last_scraped": datetime.now().isoformat(timespec="seconds"),
+        "semester": semester,
+        "courses": courses_count,
+        "events": events_count,
+    }
+    META_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _selected_events(
+    selected_ids: set[str], events_by_course_id: dict[str, list[dict[str, Any]]]
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for cid in sorted(selected_ids):
+        out.extend(events_by_course_id.get(cid, []))
+    out.sort(key=lambda ev: (_safe_str(ev.get("date")), _safe_str(ev.get("start"))))
+    return out
+
+
+def run_interactive(indexes: Indexes, rebuild_indexes_fn: Callable[[], Indexes]) -> None:
+    """
+    Interactive menu loop with optional "Update data" (scrape+parse+reload).
+    """
+    while True:
+        selected = load_selected_course_ids()
+        events = _selected_events(selected, indexes.events_by_course_id)
+
+        _print_header(selected, events)
+
+        choice = _prompt(
+            "\n[1] Search + add course\n"
+            "[2] View selected courses\n"
+            "[3] Remove a course\n"
+            "[4] Show conflicts\n"
+            "[5] Timetable (choose week)\n"
+            "[6] Agenda (all dates)\n"
+            "[7] Export .ics\n"
+            "[8] Update data (re-scrape UniLU)\n"
+            "[0] Exit\n"
+            "Select: "
+        ).strip()
+
+        if choice == "0":
+            _println("Bye.")
+            return
+
+        if choice == "1":
+            _flow_search_add(indexes, selected)
+        elif choice == "2":
+            _flow_view_selected(indexes, selected)
+        elif choice == "3":
+            _flow_remove(indexes, selected)
+        elif choice == "4":
+            _flow_conflicts(events)
+        elif choice == "5":
+            _flow_timetable_week(events)
+        elif choice == "6":
+            _flow_agenda(events)
+        elif choice == "7":
+            _flow_export(events)
+        elif choice == "8":
+            ok = _flow_update_data()
+            if ok:
+                # Reload fresh JSON into memory
+                indexes = rebuild_indexes_fn()
+                _println("Data reloaded into interactive session.")
+        else:
+            _println("Invalid choice.")
+
+
+def _print_header(selected: set[str], events: list[dict[str, Any]]) -> None:
+    meta = _read_metadata()
+    if meta:
+        last = _safe_str(meta.get("last_scraped"))
+        sem = _safe_str(meta.get("semester"))
+        c = _safe_str(meta.get("courses"))
+        e = _safe_str(meta.get("events"))
+        _println(f"\n=== MySchedule (interactive) ===")
+        _println(f"Data: semester={sem} | last_scraped={last} | courses={c} | events={e}")
+    else:
+        _println(f"\n=== MySchedule (interactive) ===")
+        _println("Data: (no metadata yet) – run [8] Update data once to generate metadata.json")
+
+    _println(f"Selected courses: {len(selected)} | Selected events: {len(events)}")
 
 
 def _course_label(course: dict[str, Any]) -> str:
@@ -43,9 +193,7 @@ def _course_label(course: dict[str, Any]) -> str:
     else:
         instr = _safe_str(instructors)
     instr = instr.strip()
-    if instr:
-        return f"{cid} | {title} | {instr}"
-    return f"{cid} | {title}"
+    return f"{cid} | {title}" + (f" | {instr}" if instr else "")
 
 
 def _event_line(ev: dict[str, Any]) -> str:
@@ -61,103 +209,6 @@ def _event_line(ev: dict[str, Any]) -> str:
     if loc:
         bits.append(f"@ {loc}")
     return " | ".join([b for b in bits if b])
-
-
-def _week_key(d: date) -> tuple[int, int]:
-    iso = d.isocalendar()
-    return (iso.year, iso.week)
-
-
-def _weekday_short(d: date) -> str:
-    # Monday=0..Sunday=6
-    names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    return names[d.weekday()]
-
-
-@dataclass(frozen=True)
-class Indexes:
-    courses: list[dict[str, Any]]
-    course_by_id: dict[str, dict[str, Any]]
-    events_by_course_id: dict[str, list[dict[str, Any]]]
-
-
-def run_interactive(indexes: Indexes) -> None:
-    """
-    Interactive menu loop. Safe to run without external dependencies.
-    Uses rich automatically if installed.
-    """
-    while True:
-        selected = load_selected_course_ids()
-        selected_events = _gather_selected_events(selected, indexes.events_by_course_id)
-
-        _print_header(selected, selected_events)
-
-        choice = _prompt(
-            "\n[1] Search + add course\n"
-            "[2] View selected courses\n"
-            "[3] Remove a course\n"
-            "[4] Show conflicts\n"
-            "[5] Timetable (choose week)\n"
-            "[6] Agenda (all dates)\n"
-            "[7] Export .ics\n"
-            "[0] Exit\n"
-            "Select: "
-        ).strip()
-
-        if choice == "0":
-            _println("Bye.")
-            return
-
-        if choice == "1":
-            _flow_search_add(indexes, selected)
-
-        elif choice == "2":
-            _flow_view_selected(indexes, selected)
-
-        elif choice == "3":
-            _flow_remove(indexes, selected)
-
-        elif choice == "4":
-            _flow_conflicts(selected_events)
-
-        elif choice == "5":
-            _flow_timetable_week(selected_events)
-
-        elif choice == "6":
-            _flow_agenda(selected_events)
-
-        elif choice == "7":
-            _flow_export(selected_events)
-
-        else:
-            _println("Invalid choice.")
-
-
-def _println(msg: str) -> None:
-    if HAS_RICH:
-        console.print(msg)
-    else:
-        print(msg)
-
-
-def _prompt(msg: str) -> str:
-    if HAS_RICH:
-        return console.input(msg)
-    return input(msg)
-
-
-def _print_header(selected: set[str], events: list[dict[str, Any]]) -> None:
-    _println("\n=== MySchedule (interactive) ===")
-    _println(f"Selected courses: {len(selected)} | Selected events: {len(events)}")
-
-
-def _gather_selected_events(
-    selected_ids: set[str], events_by_course_id: dict[str, list[dict[str, Any]]]
-) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for cid in sorted(selected_ids):
-        out.extend(events_by_course_id.get(cid, []))
-    return sorted(out, key=_event_sort_key)
 
 
 def _flow_search_add(indexes: Indexes, selected: set[str]) -> None:
@@ -252,7 +303,6 @@ def _flow_remove(indexes: Indexes, selected: set[str]) -> None:
         _println("No courses selected.")
         return
 
-    # show list
     ids = sorted(selected)
     if HAS_RICH:
         table = Table(title="Remove course", box=box.SIMPLE)
@@ -274,6 +324,7 @@ def _flow_remove(indexes: Indexes, selected: set[str]) -> None:
     if not pick.isdigit():
         _println("Not a number.")
         return
+
     i = int(pick)
     if not (1 <= i <= len(ids)):
         _println("Out of range.")
@@ -306,16 +357,19 @@ def _flow_agenda(events: list[dict[str, Any]]) -> None:
         _println("No selected events.")
         return
 
-    # group by date
-    by_date: dict[str, list[dict[str, Any]]] = {}
+    by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for ev in events:
         d = _safe_str(ev.get("date")).strip()
-        by_date.setdefault(d, []).append(ev)
+        by_date[d].append(ev)
+
+    def weekday_short(d: date) -> str:
+        names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        return names[d.weekday()]
 
     for d in sorted(by_date.keys()):
         try:
-            dd = _parse_date(d)
-            _println(f"\n{d} ({_weekday_short(dd)})")
+            dd = datetime.strptime(d, "%Y-%m-%d").date()
+            _println(f"\n{d} ({weekday_short(dd)})")
         except Exception:
             _println(f"\n{d}")
         for ev in sorted(by_date[d], key=lambda x: _safe_str(x.get("start"))):
@@ -327,102 +381,257 @@ def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
         _println("No selected events.")
         return
 
-    # determine available weeks
-    dates = []
-    for ev in events:
-        d = _safe_str(ev.get("date")).strip()
-        if not d:
-            continue
+    def parse_date(s: str) -> Optional[date]:
         try:
-            dates.append(_parse_date(d))
+            return datetime.strptime(s, "%Y-%m-%d").date()
         except Exception:
-            continue
+            return None
+
+    def week_key(d: date) -> tuple[int, int]:
+        iso = d.isocalendar()
+        return (iso.year, iso.week)
+
+    def weekday_short(d: date) -> str:
+        names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        return names[d.weekday()]
+
+    dates: list[date] = []
+    for ev in events:
+        dd = parse_date(_safe_str(ev.get("date")))
+        if dd:
+            dates.append(dd)
 
     if not dates:
         _println("No valid event dates.")
         return
 
-    weeks = sorted({_week_key(d) for d in dates})
-    # show week list
+    weeks = sorted({week_key(d) for d in dates})
     _println("\nAvailable weeks:")
     for i, (y, w) in enumerate(weeks, start=1):
         _println(f"{i}) {y}-W{w:02d}")
 
-    pick = _prompt("Choose week number (or blank = first): ").strip()
+    pick = _prompt("Choose week number (blank = first): ").strip()
     if pick and pick.isdigit() and 1 <= int(pick) <= len(weeks):
         y, w = weeks[int(pick) - 1]
     else:
         y, w = weeks[0]
 
-    # filter events in that ISO week
     week_events = []
     for ev in events:
-        d = _safe_str(ev.get("date")).strip()
-        try:
-            dd = _parse_date(d)
-        except Exception:
-            continue
-        if _week_key(dd) == (y, w):
+        dd = parse_date(_safe_str(ev.get("date")))
+        if dd and week_key(dd) == (y, w):
             week_events.append(ev)
 
     if not week_events:
         _println("No events in that week.")
         return
 
-    # group by weekday (Mon-Fri)
     buckets = {name: [] for name in ["Mon", "Tue", "Wed", "Thu", "Fri"]}
-    for ev in sorted(week_events, key=_event_sort_key):
-        d = _safe_str(ev.get("date")).strip()
-        try:
-            dd = _parse_date(d)
-            wd = _weekday_short(dd)
-        except Exception:
+    for ev in sorted(week_events, key=lambda x: (_safe_str(x.get("date")), _safe_str(x.get("start")))):
+        dd = parse_date(_safe_str(ev.get("date")))
+        if not dd:
             continue
+        wd = weekday_short(dd)
         if wd in buckets:
             buckets[wd].append(ev)
 
-    # "Grid-ish" column view (robust text)
     _println(f"\n=== Timetable {y}-W{w:02d} ===")
     if HAS_RICH:
         table = Table(box=box.SIMPLE)
         for day in ["Mon", "Tue", "Wed", "Thu", "Fri"]:
             table.add_column(day)
-        # max rows = max events per day
         max_len = max(len(buckets[d]) for d in buckets)
         for r in range(max_len):
             row = []
             for day in ["Mon", "Tue", "Wed", "Thu", "Fri"]:
-                if r < len(buckets[day]):
-                    row.append(_event_line(buckets[day][r]))
-                else:
-                    row.append("")
+                row.append(_event_line(buckets[day][r]) if r < len(buckets[day]) else "")
             table.add_row(*row)
         console.print(table)
     else:
-        # plain text columns with padding
         cols = ["Mon", "Tue", "Wed", "Thu", "Fri"]
         col_width = 38
-        lines: list[str] = []
         header = " | ".join([c.ljust(col_width) for c in cols])
-        lines.append(header)
-        lines.append("-" * len(header))
+        _println(header)
+        _println("-" * len(header))
         max_len = max(len(buckets[d]) for d in buckets)
         for r in range(max_len):
             parts = []
             for c in cols:
                 txt = _event_line(buckets[c][r]) if r < len(buckets[c]) else ""
                 parts.append(txt[:col_width].ljust(col_width))
-            lines.append(" | ".join(parts))
-        _println("\n".join(lines))
+            _println(" | ".join(parts))
 
 
 def _flow_export(events: list[dict[str, Any]]) -> None:
     if not events:
         _println("No selected events.")
         return
-    out = _prompt("Output path (e.g., out.ics): ").strip()
-    if not out:
-        _println("Cancelled.")
-        return
-    n = export_events_to_ics(events, out)
-    _println(f"Exported {n} events to: {out}")
+
+    # Default to user's Downloads folder (works on Windows/macOS/Linux)
+    downloads = Path.home() / "Downloads"
+    default_name = "myschedule.ics"
+    default_path = downloads / default_name
+
+    out_in = _prompt(f"Please enter desired file name, default is [{default_name}]: ").strip()
+    out_path = downloads / out_in if out_in else default_path
+
+    # ✅ enforce .ics extension
+    if out_path.suffix.lower() != ".ics":
+        out_path = out_path.with_suffix(".ics")
+
+    n = export_events_to_ics(events, out_path)
+    abs_path = out_path.resolve()
+
+    _println(f"\nExported {n} events.")
+    _println(f"Saved to: {abs_path}")
+
+    _println(
+        "\nNext steps:\n"
+        "- Google Calendar (desktop): Settings → Import & export → Import → choose this .ics file\n"
+        "- iPhone/Android: send the .ics file to yourself (Mail/WhatsApp/AirDrop) and tap to import\n"
+    )
+
+    # Offer to open folder in Windows Explorer
+    open_now = _prompt("Open folder now? [Y/n]: ").strip().lower()
+    if open_now != "n":
+        try:
+            if sys.platform.startswith("win"):
+                subprocess.run(["explorer.exe", "/select,", str(abs_path)], check=False)
+            else:
+                subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", str(abs_path.parent)], check=False)
+        except Exception:
+            pass
+
+
+def _flow_update_data() -> bool:
+    """
+    Runs scrape + parse as subprocesses using the current venv Python.
+    Streams output live. Writes metadata.json afterwards.
+    """
+    semester = _prompt("Semester [FS26]: ").strip()
+    if not semester:
+        semester = "FS26"
+
+    refresh_in = _prompt("Refresh (overwrite raw HTML)? [Y/n]: ").strip().lower()
+    refresh = refresh_in != "n"
+
+    _println("\nRunning scraper...")
+    ok = _run_scrape_subprocess(semester=semester, refresh=refresh)
+    if not ok:
+        _println("Scrape failed. Aborting update.")
+        return False
+
+    _println("\nRunning parser...")
+    ok = _run_parse_subprocess()
+    if not ok:
+        _println("Parse failed. Aborting update.")
+        return False
+
+    # After parse, count courses/events and write metadata
+    try:
+        courses = _load_json(PROCESSED_DIR / "courses.json")
+        events = _load_json(PROCESSED_DIR / "events.json")
+        c_count = len(courses) if isinstance(courses, list) else 0
+        e_count = len(events) if isinstance(events, list) else 0
+        _write_metadata(semester=semester, courses_count=c_count, events_count=e_count)
+        _println(f"\nUpdate done. courses={c_count} events={e_count}")
+    except Exception as e:
+        _println(f"Update done, but failed to write metadata: {e}")
+
+    return True
+
+
+def _run_scrape_subprocess(semester: str, refresh: bool) -> bool:
+    """
+    Runs: python -u -m myschedule.scrape --semester FS26 --refresh
+    Streams stdout line-by-line. Shows live progress.
+    """
+
+    cmd = [sys.executable, "-u", "-m", "myschedule.scrape", "--semester", semester]
+    if refresh:
+        cmd.append("--refresh")
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+
+    total: Optional[int] = None
+    done = 0
+
+    if HAS_RICH:
+        progress = Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeRemainingColumn(),
+            console=console,
+        )
+
+        task = progress.add_task("Scraping...", total=1)
+
+        with progress:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+
+                # Detect total number of courses
+                if line.startswith("Found ") and " courses" in line:
+                    try:
+                        total = int(line.split("Found ")[1].split(" courses")[0].strip())
+                        progress.update(task, total=total, completed=0)
+                    except Exception:
+                        pass
+
+                # Each course = one progress step
+                if line.startswith("FETCH ") or line.startswith("SKIP"):
+                    done += 1
+                    progress.update(task, completed=done)
+
+                console.print(line)
+
+            rc = proc.wait()
+            return rc == 0
+
+    else:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if line.startswith("FETCH ") or line.startswith("SKIP"):
+                done += 1
+                if total:
+                    _println(f"[{done}/{total}] {line}")
+                else:
+                    _println(line)
+            else:
+                _println(line)
+
+        rc = proc.wait()
+        return rc == 0
+
+
+def _run_parse_subprocess() -> bool:
+    """
+    Runs: python -u -m myschedule.parse
+    Streams stdout.
+    """
+    cmd = [sys.executable, "-u", "-m", "myschedule.parse"]
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        _println(line.rstrip("\n"))
+    rc = proc.wait()
+    return rc == 0
