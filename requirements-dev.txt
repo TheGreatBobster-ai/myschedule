@@ -1,0 +1,9 @@
+# These requirements are additional for development and testing, and include
+# the requirements.txt file.
+
+-r requirements.txt
+pytest
+black
+isort
+mypy
+pylint
