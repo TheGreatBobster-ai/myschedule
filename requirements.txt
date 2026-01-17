@@ -1,2 +1,4 @@
-# Add your dependencies here
+requests
+beautifulsoup4
+rich
 
