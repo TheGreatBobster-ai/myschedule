@@ -15,6 +15,7 @@ import argparse
 import json
 from collections import defaultdict
 from pathlib import Path
+from re import sub
 from typing import Any
 
 from myschedule.conflicts import find_conflicts
@@ -213,6 +214,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_export = sub.add_parser("export", help="Export selected events to .ics")
     p_export.add_argument("out", type=str, help="Output file path (e.g. out.ics)")
 
+    sub.add_parser("interactive", help="Interactive menu mode")
+
     return parser
 
 
@@ -232,5 +235,16 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_cmd_conflicts(args, events_by_course_id))
     if args.command == "export":
         raise SystemExit(_cmd_export(args, events_by_course_id))
+
+    if args.command == "interactive":
+        from myschedule.interactive import Indexes, run_interactive
+
+        indexes = Indexes(
+            courses=courses,
+            course_by_id=course_by_id,
+            events_by_course_id=events_by_course_id,
+        )
+        run_interactive(indexes)
+        raise SystemExit(0)
 
     raise SystemExit(2)
