@@ -1,3 +1,53 @@
+"""
+MySchedule Interactive Terminal Interface
+
+This module implements the full interactive TUI for MySchedule.
+It handles:
+- User interaction
+- Course selection logic
+- Conflict inspection
+- Timetable & agenda views
+- Data update orchestration
+
+Architecture:
+- Low-level helpers
+- Formatting utilities
+- Conflict helpers
+- Menu flow handlers
+- Subprocess integration
+
+This file intentionally centralizes TUI logic for maintainability.
+"""
+
+# ============================================================
+# Table of Contents
+# ============================================================
+#
+# 1) Imports & Rich Setup
+# 2) Paths & Global Constants
+# 3) Core Data Structures (Indexes)
+# 4) Terminal I/O Utilities (_println, _prompt, helpers)
+# 5) Data Loading & Indexing (JSON, metadata, build_indexes)
+# 6) Formatting Helpers (course/event labels, agenda/timetable text)
+# 7) Conflict Helper Logic (preview conflicts on add, detail view)
+# 8) Main Interactive Controller (run_interactive + main menu loop)
+# 9) Menu Flows
+#    9.1) Search + Add
+#    9.2) View Selected
+#    9.3) Remove
+#    9.4) Conflicts
+#    9.5) Timetable (Week View)
+#    9.6) Agenda (Paged / All)
+#    9.7) Export (.ics)
+#    9.8) Update Data (scrape + parse + metadata)
+# 10) Subprocess / System Layer (scrape/parse subprocess runners)
+# ============================================================
+
+
+# =========================
+# 1) Imports & Rich Setup
+# =========================
+
 from __future__ import annotations
 
 import json
@@ -31,10 +81,20 @@ except Exception:  # pragma: no cover
     console = None
 
 
+# =========================
+# 2) Paths & Global Constants
+# =========================
+
+
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROCESSED_DIR = PACKAGE_DIR / "data" / "processed"
 RAW_DIR = PACKAGE_DIR / "data" / "raw"
 META_PATH = PROCESSED_DIR / "metadata.json"
+
+
+# =========================
+# 3) Core Data Structures
+# =========================
 
 
 @dataclass
@@ -42,6 +102,11 @@ class Indexes:
     courses: list[dict[str, Any]]
     course_by_id: dict[str, dict[str, Any]]
     events_by_course_id: dict[str, list[dict[str, Any]]]
+
+
+# =========================
+# 4)Terminal I/O Utilities
+# =========================
 
 
 def _println(msg: str = "") -> None:
@@ -59,6 +124,11 @@ def _prompt(msg: str) -> str:
 
 def _safe_str(x: Any) -> str:
     return "" if x is None else str(x)
+
+
+# =========================
+# 5) Data Loading & Indexing
+# =========================
 
 
 def _load_json(path: Path) -> Any:
@@ -126,6 +196,11 @@ def _write_metadata(semester: str, courses_count: int, events_count: int) -> Non
     META_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+# =========================
+# 6) Formatting Helpers
+# =========================
+
+
 def _selected_events(
     selected_ids: set[str], events_by_course_id: dict[str, list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
@@ -134,77 +209,6 @@ def _selected_events(
         out.extend(events_by_course_id.get(cid, []))
     out.sort(key=lambda ev: (_safe_str(ev.get("date")), _safe_str(ev.get("start"))))
     return out
-
-
-def run_interactive(indexes: Indexes, rebuild_indexes_fn: Callable[[], Indexes]) -> None:
-    """
-    Interactive menu loop with optional "Update data" (scrape+parse+reload).
-    """
-
-    # --- onboarding: ensure data exists ---
-    if not _has_processed_data():
-        _println("\nNo processed data found yet (courses.json / events.json).")
-        _println("You need to run an initial scrape+parse once.")
-        go = _prompt("Run [8] Update data now? [Y/n] (0 = back): ").strip().lower()
-
-        if go == "0" or go == "n":
-            _println("Returning to menu. You can run [8] Update data anytime.")
-            return
-
-        ok = _flow_update_data()
-        if ok:
-            indexes = rebuild_indexes_fn()
-            _println("Data loaded. Welcome to MySchedule!")
-        else:
-            _println("Update was not completed. Returning to menu.")
-            return
-    # --- main menu loop ---
-
-    while True:
-        selected = load_selected_course_ids()
-        events = _selected_events(selected, indexes.events_by_course_id)
-
-        _print_header(selected, events)
-
-        choice = _prompt(
-            "\n[1] Search + add course\n"
-            "[2] View selected courses\n"
-            "[3] Remove a course\n"
-            "[4] Show conflicts\n"
-            "[5] Timetable (choose week)\n"
-            "[6] Agenda (all dates)\n"
-            "[7] Export .ics\n"
-            "[8] Update data (re-scrape UniLU)\n"
-            "[0] Exit\n"
-            "Select: "
-        ).strip()
-
-        if choice == "0":
-            _println("Bye.")
-            return
-
-        if choice == "1":
-            _flow_search_add(indexes, selected)
-        elif choice == "2":
-            _flow_view_selected(indexes, selected)
-        elif choice == "3":
-            _flow_remove(indexes, selected)
-        elif choice == "4":
-            _flow_conflicts(indexes, events)
-        elif choice == "5":
-            _flow_timetable_week(events)
-        elif choice == "6":
-            _flow_agenda(events)
-        elif choice == "7":
-            _flow_export(events)
-        elif choice == "8":
-            ok = _flow_update_data()
-            if ok:
-                # Reload fresh JSON into memory
-                indexes = rebuild_indexes_fn()
-                _println("Data reloaded into interactive session.")
-        else:
-            _println("Invalid choice.")
 
 
 def _print_header(selected: set[str], events: list[dict[str, Any]]) -> None:
@@ -299,6 +303,11 @@ def _event_line(ev: dict[str, Any]) -> str:
     return " | ".join([b for b in bits if b])
 
 
+# =========================
+# 7) Conflict Helper Logic
+# =========================
+
+
 def _conflicts_if_added(
     candidate_cid: str,
     selected_ids: set[str],
@@ -381,6 +390,89 @@ def _show_candidate_conflict_details(
             i += 1
 
     _prompt("\nPress Enter to go back: ")
+
+
+# =========================
+# 8) Main Interactive Controller
+# =========================
+
+
+def run_interactive(indexes: Indexes, rebuild_indexes_fn: Callable[[], Indexes]) -> None:
+    """
+    Interactive menu loop with optional "Update data" (scrape+parse+reload).
+    """
+
+    # --- onboarding: ensure data exists ---
+    if not _has_processed_data():
+        _println("\nNo processed data found yet (courses.json / events.json).")
+        _println("You need to run an initial scrape+parse once.")
+        go = _prompt("Run [8] Update data now? [Y/n] (0 = back): ").strip().lower()
+
+        if go == "0" or go == "n":
+            _println("Returning to menu. You can run [8] Update data anytime.")
+            return
+
+        ok = _flow_update_data()
+        if ok:
+            indexes = rebuild_indexes_fn()
+            _println("Data loaded. Welcome to MySchedule!")
+        else:
+            _println("Update was not completed. Returning to menu.")
+            return
+    # --- main menu loop ---
+
+    while True:
+        selected = load_selected_course_ids()
+        events = _selected_events(selected, indexes.events_by_course_id)
+
+        _print_header(selected, events)
+
+        choice = _prompt(
+            "\n[1] Search + add course\n"
+            "[2] View selected courses\n"
+            "[3] Remove a course\n"
+            "[4] Show conflicts\n"
+            "[5] Timetable (choose week)\n"
+            "[6] Agenda (all dates)\n"
+            "[7] Export .ics\n"
+            "[8] Update data (re-scrape UniLU)\n"
+            "[0] Exit\n"
+            "Select: "
+        ).strip()
+
+        if choice == "0":
+            _println("Bye.")
+            return
+
+        if choice == "1":
+            _flow_search_add(indexes, selected)
+        elif choice == "2":
+            _flow_view_selected(indexes, selected)
+        elif choice == "3":
+            _flow_remove(indexes, selected)
+        elif choice == "4":
+            _flow_conflicts(indexes, events)
+        elif choice == "5":
+            _flow_timetable_week(events)
+        elif choice == "6":
+            _flow_agenda(events)
+        elif choice == "7":
+            _flow_export(events)
+        elif choice == "8":
+            ok = _flow_update_data()
+            if ok:
+                # Reload fresh JSON into memory
+                indexes = rebuild_indexes_fn()
+                _println("Data reloaded into interactive session.")
+        else:
+            _println("Invalid choice.")
+
+
+# =========================
+# 9) Menu Flows
+# =========================
+
+#    9.1) Search + Add
 
 
 def _flow_search_add(indexes: Indexes, selected: set[str]) -> None:
@@ -486,6 +578,9 @@ def _flow_search_add(indexes: Indexes, selected: set[str]) -> None:
         # else loop continues (new search)
 
 
+#    9.2) View Selected
+
+
 def _flow_view_selected(indexes: Indexes, selected: set[str]) -> None:
     if not selected:
         _println("No courses selected.")
@@ -520,6 +615,9 @@ def _flow_view_selected(indexes: Indexes, selected: set[str]) -> None:
     _println("Selected courses:")
     for x in items:
         _println(f"- {x}")
+
+
+#    9.3) Remove
 
 
 def _flow_remove(indexes: Indexes, selected: set[str]) -> None:
@@ -569,6 +667,9 @@ def _flow_remove(indexes: Indexes, selected: set[str]) -> None:
         if more == "n":
             return
         # else: loop continues and shows updated list
+
+
+#    9.4) Conflicts
 
 
 def _flow_conflicts(indexes: Indexes, events: list[dict[str, Any]]) -> None:
@@ -682,6 +783,9 @@ def _flow_conflicts(indexes: Indexes, events: list[dict[str, Any]]) -> None:
             _println(f"{k}. {_safe_str(a.get('date'))}: {_event_line(a)}  <->  {_event_line(b)}")
 
         _prompt("\nPress Enter to go back...")
+
+
+#    9.5) Timetable (Week View)
 
 
 def _flow_agenda(events: list[dict[str, Any]]) -> None:
@@ -801,6 +905,9 @@ def _flow_agenda(events: list[dict[str, Any]]) -> None:
         more = _prompt("\nPress Enter to load more, or 0 to return to menu: ").strip()
         if more == "0":
             return
+
+
+#    9.6) Agenda (Paged / All)
 
 
 def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
@@ -974,6 +1081,9 @@ def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
         # else loop continues (back to week list)
 
 
+#    9.7) Export (.ics)
+
+
 def _flow_export(events: list[dict[str, Any]]) -> None:
     if not events:
         _println("No selected events.")
@@ -1053,6 +1163,9 @@ def _flow_export(events: list[dict[str, Any]]) -> None:
             pass
 
 
+#    9.8) Update Data (scrape + parse + metadata)
+
+
 def _flow_update_data() -> bool:
     """
     Runs scrape + parse as subprocesses using the current venv Python.
@@ -1129,6 +1242,11 @@ def _flow_update_data() -> bool:
         _println(f"Update done, but failed to write metadata: {e}")
 
     return True
+
+
+# =========================
+# 10) Subprocess / System Layer
+# =========================
 
 
 def _run_scrape_subprocess(semester: str, refresh: bool) -> bool:
