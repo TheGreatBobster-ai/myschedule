@@ -1376,7 +1376,9 @@ def _flow_update_data() -> bool:
     - Ctrl+C abort handling
     """
     # Step 1: semester
-    semester_in = _prompt("Semester [FS26] (0 = back): ").strip()
+    semester_in = _prompt(
+        "Semester in short and the year, (FS = Frühjahr, HS = Herbst, followed by year) [FS26] (0 = back): "
+    ).strip()
     if semester_in == "0":
         return False
     semester = semester_in or "FS26"
