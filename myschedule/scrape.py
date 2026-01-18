@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import time
 from pathlib import Path
 from typing import List, Tuple
@@ -23,6 +24,7 @@ SEARCH_URL = "https://portal.unilu.ch/search"
 # ---------------------------------------------------------------------------
 # Core logic
 # ---------------------------------------------------------------------------
+
 
 def _fetch_course_links(semester: str) -> List[Tuple[str, str]]:
     """
@@ -91,5 +93,19 @@ def scrape_semester(
 # CLI entry
 # ---------------------------------------------------------------------------
 
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="myschedule.scrape", description="Scrape UniLU course pages (cache HTML)")
+    p.add_argument("--semester", "-s", type=str, default="FS26", help="Semester code (e.g., FS26, HS25)")
+    p.add_argument("--refresh", action="store_true", help="Re-fetch and overwrite existing HTML files")
+    p.add_argument("--sleep", type=float, default=0.2, help="Sleep seconds between requests")
+    return p
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
+    scrape_semester(args.semester.strip(), refresh=args.refresh, sleep_seconds=args.sleep)
+
+
 if __name__ == "__main__":
-    scrape_semester("FS26")
+    main()

@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 
+import argparse
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +37,7 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _extract_kv_table(soup: BeautifulSoup) -> Dict[str, str]:
     data: Dict[str, str] = {}
@@ -60,6 +62,7 @@ def _extract_kv_table(soup: BeautifulSoup) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 # Termin parsing (CORE LOGIC)
 # ---------------------------------------------------------------------------
+
 
 def parse_termin_line(
     line: str,
@@ -119,6 +122,7 @@ def parse_termin_line(
 # Course page parsing
 # ---------------------------------------------------------------------------
 
+
 def parse_course_html(
     html: str,
     source_url: str,
@@ -167,6 +171,7 @@ def parse_course_html(
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def parse_all(
     raw_dir: Path = PACKAGE_DIR / "data" / "raw",
     out_dir: Path = PACKAGE_DIR / "data" / "processed",
@@ -214,3 +219,25 @@ def parse_all(
 if __name__ == "__main__":
     parse_all()
     print(f"Parsing finished. JSON written to {PACKAGE_DIR / 'data' / 'processed'}")
+
+
+# ---------------------------------------------------------------------------
+# CLI connection
+# ---------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="myschedule.parse", description="Parse cached HTML into JSON")
+    p.add_argument("--raw-dir", type=Path, default=PACKAGE_DIR / "data" / "raw")
+    p.add_argument("--out-dir", type=Path, default=PACKAGE_DIR / "data" / "processed")
+    return p
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
+    parse_all(raw_dir=args.raw_dir, out_dir=args.out_dir)
+    print(f"Parsing finished. JSON written to {args.out_dir.resolve()}")
+
+
+if __name__ == "__main__":
+    main()

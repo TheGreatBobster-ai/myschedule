@@ -1,38 +1,47 @@
-import io
-import os
+from __future__ import annotations
+
+from pathlib import Path
 from typing import Any
 
 from setuptools import find_packages, setup
 
 
-def read(*paths: str, **kwargs: Any) -> str:
-    content = ""
-    with io.open(
-        os.path.join(os.path.dirname(__file__), *paths),
-        encoding=kwargs.get("encoding", "utf8"),
-    ) as open_file:
-        content = open_file.read().strip()
-    return content
+ROOT = Path(__file__).resolve().parent
 
 
-def read_requirements(path: str) -> list:
-    return [
-        line.strip()
-        for line in read(path).split("\n")
-        if not line.startswith(('"', "#", "-", "git+"))
-    ]
+def read_text(path: Path, default: str = "") -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return default
 
+
+def read_requirements(filename: str) -> list[str]:
+    req_path = ROOT / filename
+    if not req_path.exists():
+        return []
+    lines = read_text(req_path).splitlines()
+    out: list[str] = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("-r"):
+            continue
+        out.append(line)
+    return out
+
+
+version = read_text(ROOT / "myschedule" / "VERSION", default="0.1.0")
 
 setup(
     name="myschedule",
-    version=read("myschedule", "VERSION"),
-    description="project_description",
-    url="https://github.com/author_name/project_urlname/",
-    long_description=read("README.md"),
+    version=version,
+    description="MySchedule – UniLU course scraper + timetable manager (CLI + interactive)",
+    url="https://github.com/TheGreatBobster-ai/myschedule.git",
+    long_description=read_text(ROOT / "README.md"),
     long_description_content_type="text/markdown",
-    author="author_name",
-    packages=find_packages(exclude=["tests", ".github"]),
+    author="Robert Puselja / Nikolas Kehrer",
+    packages=find_packages(exclude=("tests", ".github")),
     install_requires=read_requirements("requirements.txt"),
-    entry_points={"console_scripts": ["myschedule = myschedule.__main__:main"]},
-    extras_require={"test": read_requirements("requirements-test.txt")},
+    extras_require={"dev": read_requirements("requirements-dev.txt")},
+    entry_points={"console_scripts": ["myschedule=myschedule.cli:main"]},
 )

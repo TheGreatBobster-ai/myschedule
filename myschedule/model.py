@@ -6,4 +6,31 @@ We define the structure of Course and Event here so:
 - the code stays readable for beginners
 """
 
-# TODO: add dataclasses for Course and Event later (optional but nice).
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Optional, List
+
+
+@dataclass
+class Course:
+    course_id: str
+    title: str
+    semester: Optional[str]
+    type: Optional[str]
+    instructors: List[str]
+    department: Optional[str]
+    study_level: Optional[str]
+    source_url: str
+
+
+@dataclass
+class Event:
+    event_id: str
+    course_id: str
+    title: str
+    kind: str
+    date: str
+    start: str
+    end: str
+    location: str
+    note: Optional[str]

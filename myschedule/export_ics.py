@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def _ics_escape(text: str) -> str:
@@ -69,6 +69,8 @@ def export_events_to_ics(events: list[dict[str, Any]], out_path: str | Path) -> 
 
         lines.append("BEGIN:VEVENT")
         lines.append(f"UID:{_ics_escape(uid)}")
+        dtstamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        lines.append(f"DTSTAMP:{dtstamp}")
         lines.append(f"DTSTART:{dtstart}")
         lines.append(f"DTEND:{dtend}")
         lines.append(f"SUMMARY:{_ics_escape(summary)}")
