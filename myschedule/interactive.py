@@ -8,7 +8,8 @@ import time
 from collections import Counter
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -64,9 +65,21 @@ def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _has_processed_data() -> bool:
+    return (PROCESSED_DIR / "courses.json").exists() and (PROCESSED_DIR / "events.json").exists()
+
+
 def build_indexes() -> Indexes:
     courses_path = PROCESSED_DIR / "courses.json"
     events_path = PROCESSED_DIR / "events.json"
+
+    # Onboarding safety: no data yet
+    if not courses_path.exists() or not events_path.exists():
+        return Indexes(
+            courses=[],
+            course_by_id={},
+            events_by_course_id=defaultdict(list),
+        )
 
     courses_raw = _load_json(courses_path)
     events_raw = _load_json(events_path)
@@ -86,7 +99,11 @@ def build_indexes() -> Indexes:
         if cid:
             events_by_course_id[cid].append(e)
 
-    return Indexes(courses=courses, course_by_id=course_by_id, events_by_course_id=events_by_course_id)
+    return Indexes(
+        courses=courses,
+        course_by_id=course_by_id,
+        events_by_course_id=events_by_course_id,
+    )
 
 
 def _read_metadata() -> dict[str, Any]:
@@ -123,6 +140,26 @@ def run_interactive(indexes: Indexes, rebuild_indexes_fn: Callable[[], Indexes])
     """
     Interactive menu loop with optional "Update data" (scrape+parse+reload).
     """
+
+    # --- onboarding: ensure data exists ---
+    if not _has_processed_data():
+        _println("\nNo processed data found yet (courses.json / events.json).")
+        _println("You need to run an initial scrape+parse once.")
+        go = _prompt("Run [8] Update data now? [Y/n] (0 = back): ").strip().lower()
+
+        if go == "0" or go == "n":
+            _println("Returning to menu. You can run [8] Update data anytime.")
+            return
+
+        ok = _flow_update_data()
+        if ok:
+            indexes = rebuild_indexes_fn()
+            _println("Data loaded. Welcome to MySchedule!")
+        else:
+            _println("Update was not completed. Returning to menu.")
+            return
+    # --- main menu loop ---
+
     while True:
         selected = load_selected_course_ids()
         events = _selected_events(selected, indexes.events_by_course_id)
@@ -262,6 +299,90 @@ def _event_line(ev: dict[str, Any]) -> str:
     return " | ".join([b for b in bits if b])
 
 
+def _conflicts_if_added(
+    candidate_cid: str,
+    selected_ids: set[str],
+    events_by_course_id: dict[str, list[dict[str, Any]]],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """
+    Returns conflict pairs where one event is from the candidate course and
+    the other event is from already selected courses.
+    """
+    cand_events = events_by_course_id.get(candidate_cid, [])
+    if not cand_events or not selected_ids:
+        return []
+
+    selected_events: list[dict[str, Any]] = []
+    for cid in selected_ids:
+        selected_events.extend(events_by_course_id.get(cid, []))
+
+    # Run your existing engine
+    all_pairs = find_conflicts(selected_events + cand_events)
+
+    # Filter to only pairs that involve candidate course vs selected courses
+    out: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for a, b in all_pairs:
+        a_c = _safe_str(a.get("course_id")).strip().upper()
+        b_c = _safe_str(b.get("course_id")).strip().upper()
+        if a_c == candidate_cid and b_c in selected_ids:
+            out.append((a, b))
+        elif b_c == candidate_cid and a_c in selected_ids:
+            out.append((b, a))  # normalize: (candidate_event, other_event)
+    return out
+
+
+def _show_candidate_conflict_details(
+    candidate_cid: str,
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    indexes: Indexes,
+) -> None:
+    """
+    Prints conflicts grouped by other course.
+    pairs are normalized as (candidate_event, other_event).
+    """
+    if not pairs:
+        _println("No conflicts.")
+        return
+
+    # group by other course id
+    by_other: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = defaultdict(list)
+    for cand_ev, other_ev in pairs:
+        other_cid = _safe_str(other_ev.get("course_id")).strip().upper()
+        by_other[other_cid].append((cand_ev, other_ev))
+
+    cand_course = indexes.course_by_id.get(candidate_cid, {"course_id": candidate_cid, "title": ""})
+    cand_label = _course_label(cand_course, indexes.events_by_course_id)
+
+    _println(f"\nConflicts for candidate course:\n- {cand_label}\n")
+
+    # Overview
+    for other_cid in sorted(by_other.keys()):
+        other_course = indexes.course_by_id.get(other_cid, {"course_id": other_cid, "title": ""})
+        other_label = _course_label(other_course, indexes.events_by_course_id)
+        n = len(by_other[other_cid])
+        _println(f"* {other_label}  →  {n} conflicts")
+
+    # Details
+    _println("\nDetails:")
+    i = 1
+    for other_cid in sorted(by_other.keys()):
+        other_course = indexes.course_by_id.get(other_cid, {"course_id": other_cid, "title": ""})
+        other_label = _course_label(other_course, indexes.events_by_course_id)
+        _println(f"\n=== With: {other_label} ===")
+        for cand_ev, other_ev in sorted(
+            by_other[other_cid], key=lambda p: (_safe_str(p[0].get("date")), _safe_str(p[0].get("start")))
+        ):
+            left = _event_line(cand_ev)
+            right = _event_line(other_ev)
+            if HAS_RICH:
+                _println(f"{i}) [red]{left}[/]  <->  [red]{right}[/]")
+            else:
+                _println(f"{i}) ! {left}  <->  ! {right}")
+            i += 1
+
+    _prompt("\nPress Enter to go back: ")
+
+
 def _flow_search_add(indexes: Indexes, selected: set[str]) -> None:
     """
     Search courses and add them. After adding (or already-selected), ask whether
@@ -325,9 +446,39 @@ def _flow_search_add(indexes: Indexes, selected: set[str]) -> None:
         if cid in selected:
             _println(f"Already selected: {cid}")
         else:
-            selected.add(cid)
-            save_selected_course_ids(selected)
-            _println(f"Added: {cid}")
+            # --- conflict preview before adding ---
+            pairs = _conflicts_if_added(cid, selected, indexes.events_by_course_id)
+
+            if pairs:
+                other_courses = sorted({_safe_str(b.get("course_id")).strip().upper() for (_, b) in pairs})
+                n_courses = len(other_courses)
+                n_events = len(pairs)
+
+                _println(
+                    f"\n⚠️ This course conflicts with {n_courses} selected course(s), "
+                    f"total {n_events} conflicting event overlap(s)."
+                )
+
+                # loop until user decides
+                while True:
+                    ans = _prompt("Add anyway? [Y]=add, [N]=cancel, [D]=details: ").strip().lower()
+                    if ans == "y" or ans == "":
+                        selected.add(cid)
+                        save_selected_course_ids(selected)
+                        _println(f"Added: {cid}")
+                        break
+                    if ans == "n" or ans == "0":
+                        _println("Not added.")
+                        break
+                    if ans == "d":
+                        _show_candidate_conflict_details(cid, pairs, indexes)
+                        # then return here (same question again)
+                        continue
+                    _println("Invalid input.")
+            else:
+                selected.add(cid)
+                save_selected_course_ids(selected)
+                _println(f"Added: {cid}")
 
         more = _prompt("Add another course? [Y/n]: ").strip().lower()
         if more == "n":
@@ -538,23 +689,118 @@ def _flow_agenda(events: list[dict[str, Any]]) -> None:
         _println("No selected events.")
         return
 
+    # --- build conflict markers ---
+    conf_pairs = find_conflicts(events)
+
+    def event_key(ev: dict[str, Any]) -> tuple[str, str, str, str]:
+        return (
+            _safe_str(ev.get("date")),
+            _safe_str(ev.get("start")),
+            _safe_str(ev.get("end")),
+            _safe_str(ev.get("course_id")),
+        )
+
+    conflict_keys: set[tuple[str, str, str, str]] = set()
+    for a, b in conf_pairs:
+        conflict_keys.add(event_key(a))
+        conflict_keys.add(event_key(b))
+
+    def fmt_event(ev: dict[str, Any]) -> str:
+        txt = _event_line(ev)
+        if event_key(ev) in conflict_keys:
+            if HAS_RICH:
+                return f"[red]{txt}[/]"
+            return f"! {txt}"
+        return txt
+
+    # --- group by date ---
     by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for ev in events:
         d = _safe_str(ev.get("date")).strip()
-        by_date[d].append(ev)
+        if d:
+            by_date[d].append(ev)
 
     def weekday_short(d: date) -> str:
         names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         return names[d.weekday()]
 
-    for d in sorted(by_date.keys()):
+    def parse_date(s: str) -> Optional[date]:
         try:
-            dd = datetime.strptime(d, "%Y-%m-%d").date()
-            _println(f"\n{d} ({weekday_short(dd)})")
+            return datetime.strptime(s, "%Y-%m-%d").date()
         except Exception:
-            _println(f"\n{d}")
-        for ev in sorted(by_date[d], key=lambda x: _safe_str(x.get("start"))):
-            _println(f"  - {_event_line(ev)}")
+            return None
+
+    def week_key(d: date) -> tuple[int, int]:
+        iso = d.isocalendar()
+        return (iso.year, iso.week)
+
+    # sort all dates
+    sorted_dates = sorted(by_date.keys())
+
+    # build mapping week -> dates
+    week_to_dates: dict[tuple[int, int], list[str]] = defaultdict(list)
+    for ds in sorted_dates:
+        dd = parse_date(ds)
+        if dd is None:
+            continue
+        week_to_dates[week_key(dd)].append(ds)
+
+    weeks = sorted(week_to_dates.keys())
+
+    # UX params
+    WEEKS_PER_PAGE = 4
+
+    # legend
+    if conflict_keys:
+        if HAS_RICH:
+            _println("Legend: [red]CONFLICT[/] = overlaps detected")
+        else:
+            _println("Legend: ! = conflict (overlap)")
+
+    # menu: allow show all or paged
+    mode = _prompt("\nAgenda mode: [Enter]=paged (4 weeks), [A]=show all, [0]=back: ").strip().lower()
+    if mode == "0":
+        return
+    show_all = mode == "a"
+
+    idx = 0
+    while idx < len(weeks):
+        # decide which weeks to show this page
+        page_weeks = weeks[idx:] if show_all else weeks[idx : idx + WEEKS_PER_PAGE]
+
+        for y, w in page_weeks:
+            # week header
+            mon = date.fromisocalendar(y, w, 1)
+            sun = mon + timedelta(days=6)
+            if HAS_RICH:
+                _println(
+                    f"\n[bold cyan]=== {y}-W{w:02d} ({mon.isoformat()} → {sun.isoformat()}) ==============================[/]"
+                )
+            else:
+                _println(f"\n=== {y}-W{w:02d} ({mon.isoformat()} → {sun.isoformat()}) ===")
+
+            # dates inside week
+            for ds in week_to_dates[(y, w)]:
+                dd = parse_date(ds)
+                if dd:
+                    _println(f"\n{ds} ({weekday_short(dd)})")
+                else:
+                    _println(f"\n{ds}")
+
+                for ev in sorted(by_date[ds], key=lambda x: _safe_str(x.get("start"))):
+                    _println(f"  - {fmt_event(ev)}")
+
+        if show_all:
+            return  # done
+
+        idx += WEEKS_PER_PAGE
+        if idx >= len(weeks):
+            return
+
+        # paging controls
+        more = _prompt("\nPress Enter to load more, or 0 to return to menu: ").strip()
+        if more == "0":
+            return
 
 
 def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
@@ -576,6 +822,13 @@ def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
         names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         return names[d.weekday()]
 
+    def week_range_label(y: int, w: int) -> str:
+        # ISO week starts Monday = 1
+        mon = date.fromisocalendar(y, w, 1)
+        sun = mon + timedelta(days=6)
+        return f"{y}-W{w:02d} ({mon.isoformat()} → {sun.isoformat()})"
+
+    # collect all valid dates
     dates: list[date] = []
     for ev in events:
         dd = parse_date(_safe_str(ev.get("date")))
@@ -587,60 +840,138 @@ def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
         return
 
     weeks = sorted({week_key(d) for d in dates})
-    _println("\nAvailable weeks:")
-    for i, (y, w) in enumerate(weeks, start=1):
-        _println(f"{i}) {y}-W{w:02d}")
 
-    pick = _prompt("Choose week number (blank = first): ").strip()
-    if pick and pick.isdigit() and 1 <= int(pick) <= len(weeks):
-        y, w = weeks[int(pick) - 1]
-    else:
-        y, w = weeks[0]
+    # Loop so user can view multiple weeks without re-entering menu
+    while True:
 
-    week_events = []
-    for ev in events:
-        dd = parse_date(_safe_str(ev.get("date")))
-        if dd and week_key(dd) == (y, w):
-            week_events.append(ev)
+        _println("\nAvailable weeks:")
 
-    if not week_events:
-        _println("No events in that week.")
-        return
+        # Precompute conflicts per week (for display)
+        week_conf_count: dict[tuple[int, int], int] = {}
+        for yw in weeks:
+            yy, ww = yw
+            wk_events = []
+            for ev in events:
+                dd = parse_date(_safe_str(ev.get("date")))
+                if dd and week_key(dd) == (yy, ww):
+                    wk_events.append(ev)
+            week_conf_count[yw] = len(find_conflicts(wk_events))
 
-    buckets = {name: [] for name in ["Mon", "Tue", "Wed", "Thu", "Fri"]}
-    for ev in sorted(week_events, key=lambda x: (_safe_str(x.get("date")), _safe_str(x.get("start")))):
-        dd = parse_date(_safe_str(ev.get("date")))
-        if not dd:
+        for i, (y, w) in enumerate(weeks, start=1):
+            label = week_range_label(y, w)
+            nconf = week_conf_count.get((y, w), 0)
+
+            if HAS_RICH:
+                conf_txt = f"[red]{nconf} conflicts[/]" if nconf > 0 else "[green]0 conflicts[/]"
+                _println(f"{i:>2}) {label}  |  {conf_txt}")
+            else:
+                _println(f"{i}) {label}  |  {nconf} conflicts")
+
+        pick = _prompt("Choose week number (blank = first, 0 = back): ").strip()
+        if pick == "0":
+            return
+
+        if pick and pick.isdigit() and 1 <= int(pick) <= len(weeks):
+            y, w = weeks[int(pick) - 1]
+        else:
+            y, w = weeks[0]
+
+        # filter events for this week
+        week_events: list[dict[str, Any]] = []
+        for ev in events:
+            dd = parse_date(_safe_str(ev.get("date")))
+            if dd and week_key(dd) == (y, w):
+                week_events.append(ev)
+
+        if not week_events:
+            _println("No events in that week.")
             continue
-        wd = weekday_short(dd)
-        if wd in buckets:
-            buckets[wd].append(ev)
 
-    _println(f"\n=== Timetable {y}-W{w:02d} ===")
-    if HAS_RICH:
-        table = Table(box=box.SIMPLE)
-        for day in ["Mon", "Tue", "Wed", "Thu", "Fri"]:
-            table.add_column(day)
-        max_len = max(len(buckets[d]) for d in buckets)
-        for r in range(max_len):
+        # detect conflicts within that week (mark conflict events)
+        conf_pairs = find_conflicts(week_events)
+
+        def event_key(ev: dict[str, Any]) -> tuple[str, str, str, str]:
+            # stable key, event_id may not exist everywhere
+            return (
+                _safe_str(ev.get("date")),
+                _safe_str(ev.get("start")),
+                _safe_str(ev.get("end")),
+                _safe_str(ev.get("course_id")),
+            )
+
+        conflict_keys: set[tuple[str, str, str, str]] = set()
+        for a, b in conf_pairs:
+            conflict_keys.add(event_key(a))
+            conflict_keys.add(event_key(b))
+
+        def fmt_event(ev: dict[str, Any], rich: bool) -> str:
+            txt = _event_line(ev)
+            if event_key(ev) in conflict_keys:
+                if rich and HAS_RICH:
+                    return f"[red]{txt}[/]"
+                return f"! {txt}"  # plain fallback
+            return txt
+
+        # bucket by weekday incl Saturday
+        buckets = {name: [] for name in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]}
+        for ev in sorted(week_events, key=lambda x: (_safe_str(x.get("date")), _safe_str(x.get("start")))):
+            dd = parse_date(_safe_str(ev.get("date")))
+            if not dd:
+                continue
+            wd = weekday_short(dd)
+            if wd in buckets:
+                buckets[wd].append(ev)
+
+        # header with date range
+        mon = date.fromisocalendar(y, w, 1)
+        sun = mon + timedelta(days=6)
+        _println(f"\n=== Timetable {y}-W{w:02d} ({mon.isoformat()} → {sun.isoformat()}) ===")
+
+        # legend (only if conflicts exist)
+        if conflict_keys:
+            if HAS_RICH:
+                _println("Legend: [red]CONFLICT[/] = overlaps detected in this week")
+            else:
+                _println("Legend: ! = conflict (overlap)")
+
+        if HAS_RICH:
+            table = Table(box=box.SIMPLE)
+            for day in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
+                table.add_column(day)
+
+            def day_cell(day: str) -> str:
+                if not buckets[day]:
+                    return ""
+                # blank line between events for readability
+                return "\n\n".join(fmt_event(ev, rich=True) for ev in buckets[day])
+
+            table.add_row(*(day_cell(d) for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]))
+            console.print(table)
+
+        else:
+            cols = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+            col_width = 38
+            header = " | ".join([c.ljust(col_width) for c in cols])
+            _println(header)
+            _println("-" * len(header))
+
+            def day_cell_plain(day: str) -> str:
+                if not buckets[day]:
+                    return ""
+                return "\n\n".join(fmt_event(ev, rich=False) for ev in buckets[day])
+
             row = []
-            for day in ["Mon", "Tue", "Wed", "Thu", "Fri"]:
-                row.append(_event_line(buckets[day][r]) if r < len(buckets[day]) else "")
-            table.add_row(*row)
-        console.print(table)
-    else:
-        cols = ["Mon", "Tue", "Wed", "Thu", "Fri"]
-        col_width = 38
-        header = " | ".join([c.ljust(col_width) for c in cols])
-        _println(header)
-        _println("-" * len(header))
-        max_len = max(len(buckets[d]) for d in buckets)
-        for r in range(max_len):
-            parts = []
             for c in cols:
-                txt = _event_line(buckets[c][r]) if r < len(buckets[c]) else ""
-                parts.append(txt[:col_width].ljust(col_width))
-            _println(" | ".join(parts))
+                txt = day_cell_plain(c)
+                row.append(txt[:col_width].ljust(col_width))
+
+            _println(" | ".join(row))
+
+        # flow control
+        after = _prompt("\nPress Enter to choose another week, or 0 to return to menu: ").strip()
+        if after == "0":
+            return
+        # else loop continues (back to week list)
 
 
 def _flow_export(events: list[dict[str, Any]]) -> None:
@@ -653,12 +984,50 @@ def _flow_export(events: list[dict[str, Any]]) -> None:
     default_name = "myschedule.ics"
     default_path = downloads / default_name
 
-    out_in = _prompt(f"Please enter desired file name, default is [{default_name}]: ").strip()
-    out_path = downloads / out_in if out_in else default_path
+    choice = _prompt(f"Export location: [Enter]=Downloads/{default_name}, [P]=custom path, [0]=back: ").strip().lower()
 
-    # ✅ enforce .ics extension
+    if choice == "0":
+        return
+
+    if choice == "p":
+        # User can enter either:
+        # - a filename (we put it into Downloads)
+        # - or a full/relative path
+        user_path = _prompt("Enter file name or full path (e.g. my.ics or C:\\temp\\my.ics): ").strip()
+        if not user_path:
+            out_path = default_path
+        else:
+            p = Path(user_path).expanduser()
+
+            # If only a filename is given (no parent), store in Downloads
+            if str(p.parent) in (".", ""):
+                out_path = downloads / p.name
+            else:
+                out_path = p
+    else:
+        # default Downloads
+        out_in = _prompt(f"File name in Downloads [default: {default_name}]: ").strip()
+        out_path = downloads / out_in if out_in else default_path
+
+    # enforce .ics extension
     if out_path.suffix.lower() != ".ics":
         out_path = out_path.with_suffix(".ics")
+
+    # --- Deduplicate events (avoid double exports) ---
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for ev in events:
+        key = _safe_str(ev.get("event_id")).strip()
+        if not key:
+            key = (
+                f"{_safe_str(ev.get('course_id'))}|{_safe_str(ev.get('date'))}|"
+                f"{_safe_str(ev.get('start'))}|{_safe_str(ev.get('end'))}"
+            )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(ev)
+    events = unique
 
     n = export_events_to_ics(events, out_path)
     abs_path = out_path.resolve()
@@ -688,24 +1057,64 @@ def _flow_update_data() -> bool:
     """
     Runs scrape + parse as subprocesses using the current venv Python.
     Streams output live. Writes metadata.json afterwards.
-    """
-    semester = _prompt("Semester [FS26]: ").strip()
-    if not semester:
-        semester = "FS26"
 
-    refresh_in = _prompt("Refresh (overwrite raw HTML)? [Y/n]: ").strip().lower()
+    UX improvements:
+    - 0 = back at each step
+    - confirm screen before long scrape
+    - clear explanation of refresh behavior + processed overwrite
+    - Ctrl+C abort handling
+    """
+    # Step 1: semester
+    semester_in = _prompt("Semester [FS26] (0 = back): ").strip()
+    if semester_in == "0":
+        return False
+    semester = semester_in or "FS26"
+
+    _println(
+        "\nAbout update:\n"
+        "- Raw HTML cache: stored in myschedule/data/raw/\n"
+        "- Processed JSON: courses/events are rebuilt and OVERWRITTEN each time.\n"
+        "- Your selected courses (selected_courses.json) stay unchanged.\n"
+    )
+
+    # Step 2: refresh explanation + input
+    _println(
+        "Refresh option:\n"
+        "- [Y] Refresh = re-download ALL course pages and overwrite existing HTML files.\n"
+        "- [N] No refresh = keep existing HTML files (SKIP) and only fetch missing ones.\n"
+        "Note: We do NOT delete old raw files. If UniLU removes a course, old HTML may remain.\n"
+    )
+
+    refresh_in = _prompt("Refresh (overwrite raw HTML)? [Y/n] (0 = back): ").strip().lower()
+    if refresh_in == "0":
+        return False
     refresh = refresh_in != "n"
 
-    _println("\nRunning scraper...")
-    ok = _run_scrape_subprocess(semester=semester, refresh=refresh)
-    if not ok:
-        _println("Scrape failed. Aborting update.")
+    # Step 3: confirm long run
+    _println(
+        "\nThis may take ~10–15 minutes depending on semester size and connection.\n"
+        "You can abort anytime with Ctrl+C.\n"
+        "If you abort during scraping, some files may be updated while others stay old.\n"
+    )
+    confirm = _prompt("Start update now? [Y/n] (0 = back): ").strip().lower()
+    if confirm == "0":
+        return False
+    if confirm == "n":
+        _println("Update cancelled.")
         return False
 
-    _println("\nRunning parser...")
+    # Run scraper
+    _println("\nRunning scraper... (Ctrl+C to abort)")
+    ok = _run_scrape_subprocess(semester=semester, refresh=refresh)
+    if not ok:
+        _println("Scrape failed or was aborted. Update cancelled (processed data not rebuilt).")
+        return False
+
+    # Run parser
+    _println("\nRunning parser... (Ctrl+C to abort)")
     ok = _run_parse_subprocess()
     if not ok:
-        _println("Parse failed. Aborting update.")
+        _println("Parse failed or was aborted. Processed JSON may be incomplete.")
         return False
 
     # After parse, count courses/events and write metadata
@@ -726,8 +1135,11 @@ def _run_scrape_subprocess(semester: str, refresh: bool) -> bool:
     """
     Runs: python -u -m myschedule.scrape --semester FS26 --refresh
     Streams stdout line-by-line. Shows live progress.
-    """
 
+    Ctrl+C aborts cleanly:
+    - terminates scraper process
+    - returns False to caller
+    """
     cmd = [sys.executable, "-u", "-m", "myschedule.scrape", "--semester", semester]
     if refresh:
         cmd.append("--refresh")
@@ -745,62 +1157,67 @@ def _run_scrape_subprocess(semester: str, refresh: bool) -> bool:
     total: Optional[int] = None
     done = 0
 
-    if HAS_RICH:
-        progress = Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("{task.completed}/{task.total}"),
-            TimeRemainingColumn(),
-            console=console,
-        )
+    try:
+        if HAS_RICH:
+            progress = Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("{task.completed}/{task.total}"),
+                TimeRemainingColumn(),
+                console=console,
+            )
 
-        task = progress.add_task("Scraping...", total=1)
+            task = progress.add_task("Scraping...", total=1)
 
-        with progress:
+            with progress:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    line = line.rstrip("\n")
+
+                    # Detect total number of courses
+                    if line.startswith("Found ") and " courses" in line:
+                        try:
+                            total = int(line.split("Found ")[1].split(" courses")[0].strip())
+                            progress.update(task, total=total, completed=0)
+                        except Exception:
+                            pass
+
+                    # Each course = one progress step
+                    if line.startswith("FETCH ") or line.startswith("SKIP"):
+                        done += 1
+                        progress.update(task, completed=done)
+
+                    console.print(line)
+
+                rc = proc.wait()
+                return rc == 0
+
+        else:
             assert proc.stdout is not None
             for line in proc.stdout:
                 line = line.rstrip("\n")
-
-                # Detect total number of courses
-                if line.startswith("Found ") and " courses" in line:
-                    try:
-                        total = int(line.split("Found ")[1].split(" courses")[0].strip())
-                        progress.update(task, total=total, completed=0)
-                    except Exception:
-                        pass
-
-                # Each course = one progress step
                 if line.startswith("FETCH ") or line.startswith("SKIP"):
                     done += 1
-                    progress.update(task, completed=done)
-
-                console.print(line)
+                    if total:
+                        _println(f"[{done}/{total}] {line}")
+                    else:
+                        _println(line)
+                else:
+                    _println(line)
 
             rc = proc.wait()
             return rc == 0
 
-    else:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            if line.startswith("FETCH ") or line.startswith("SKIP"):
-                done += 1
-                if total:
-                    _println(f"[{done}/{total}] {line}")
-                else:
-                    _println(line)
-            else:
-                _println(line)
-
-        rc = proc.wait()
-        return rc == 0
+    except KeyboardInterrupt:
+        _println("\nAborted by user (Ctrl+C). Stopping scraper...")
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        return False
 
 
 def _run_parse_subprocess() -> bool:
-    """
-    Runs: python -u -m myschedule.parse
-    Streams stdout.
-    """
     cmd = [sys.executable, "-u", "-m", "myschedule.parse"]
     proc = subprocess.Popen(
         cmd,
@@ -811,8 +1228,16 @@ def _run_parse_subprocess() -> bool:
         errors="replace",
         bufsize=1,
     )
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        _println(line.rstrip("\n"))
-    rc = proc.wait()
-    return rc == 0
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            _println(line.rstrip("\n"))
+        rc = proc.wait()
+        return rc == 0
+    except KeyboardInterrupt:
+        _println("\nAborted by user (Ctrl+C). Stopping parser...")
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        return False

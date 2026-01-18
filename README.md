@@ -1,45 +1,165 @@
-# Python Package Template
+# MySchedule — Personal University Timetable Manager
 
-This is a template for the Python project in the course _Introduction to Computer Science and Programming_ at the University of Lucerne.
+MySchedule is an interactive Python application that automatically builds a personal university timetable by scraping the University of Lucerne course catalog.
 
-## Prepare Repository
-1. Rename all instances of `"project_name"`
-2. Create virtual environment: `python -m venv venv`
-3. Activate virtual environment:
-	- MacOS/Linux: `source venv/bin/activate`
-    - Windows: `venv\Scripts\activate`
-4. Install requirements and requirements-test:
-	- `pip install -r requirements.txt -r requirements-test.txt`
-5. Run tests `pytest tests/test_cli.py`
-6. Run project
-    - `python -m myschedule` or
-	- `python myschedule/__main__.py`
-		- `__main__.py` is the entry point
-7. Run code linting: `pylint [myschedule]`
-8. Run static type checking: `mypy .`
-9. Run code formatter: `black .`
+It allows students to:
 
+- Search and select courses
+- Detect timetable conflicts
+- View weekly timetables and full agendas
+- Export schedules to calendar apps (Google, Outlook, iOS)
 
-#####
+The tool combines web scraping, data processing, and a rich interactive terminal interface.
 
-# UniLu MySchedule (CLI)
+_________________________________________________________________
 
-A local Python CLI tool that scrapes the public university course catalog,
-allows students to search and select courses, detects schedule conflicts,
-and exports the schedule as an iCalendar (.ics) file.
+# Features
 
-## Features
-- Scrape public course pages (cached locally)
-- Parse course metadata and all individual event dates
-- Search courses by keyword
-- Select / remove courses
-- Detect schedule conflicts
-- Export calendar (.ics)
+- Automatic scraping of UniLU course catalog
+- Intelligent course search by title, code, or instructor
+- Persistent personal course selection
+- Conflict detection between overlapping events
+- Weekly timetable visualization
+- Chronological agenda view
+- Export to .ics calendar file
+- Cross-platform (Windows, macOS, Linux)
 
-## Setup (Windows, VS Code)
-```bash
+_________________________________________________________________
+
+# Installation
+
+1) Clone the repository:
+
+git clone https://github.com/TheGreatBobster-ai/myschedule.git
+cd myschedule
+
+2) Create and activate a virtual environment:
+
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+source .venv/bin/activate      # macOS/Linux
+.venv\Scripts\activate         # Windows
+
+3) Install dependencies:
+
 pip install -r requirements.txt
-pip install -r requirements-test.txt
+
+-----------------------------------------------------------------
+
+## Optional: Install as system command
+
+You can install MySchedule as a system-wide command:
+
 pip install -e .
+
+
+-> After that, you can start the program from anywhere using:
+
+myschedule
+
+
+Instead of:
+
+python -m myschedule
+
+_________________________________________________________________
+
+# First Start (Important)
+
+On the very first run, no course data exists yet.
+
+->Start the application:
+
+python -m myschedule
+
+
+-> The program will automatically detect that no data is available and guide you to download the course catalog.
+
+Simply follow the on-screen instructions.
+
+_________________________________________________________________
+
+# Normal Usage
+
+Start the interactive application:
+
+python -m myschedule
+
+
+Main workflow:
+
+1) Update data (once per semester)
+2) Search & add courses
+3) View timetable / agenda
+4) Check conflicts
+5) Export to calendar
+
+All functions are accessible via the interactive menu.
+
+_________________________________________________________________
+
+# Updating Course Data
+
+To refresh all course information:
+
+python -m myschedule
+
+
+-> Select:
+
+[8] Update data (re-scrape UniLU)
+
+
+This downloads the latest course catalog and rebuilds the internal database.
+
+_________________________________________________________________
+
+# Calendar Export
+
+MySchedule can export your personal timetable to a calendar file:
+
+- Google Calendar
+- Outlook
+- Apple Calendar
+
+The exported .ics file can be imported into any standard calendar application.
+Apple calenders on phones can be tricky but should work when the file is opened
+in one's mail-app on the phone.
+
+_________________________________________________________________
+
+# Technical Overview
+
+Architecture:
+
+scrape.py   → downloads raw HTML
+parse.py    → converts HTML to structured JSON
+interactive.py → user interface
+conflicts.py → overlap detection
+export_ics.py → calendar export
+
+
+All user selections are stored locally and persist across sessions.
+
+_________________________________________________________________
+
+# Project Context
+
+This project was developed as part of the Introductory Computer Science & Programming course.
+
+It demonstrates:
+
+- Modular software architecture
+- Web scraping
+- Data processing pipelines
+- Interactive terminal UI design
+- Collaborative software development
+
+_________________________________________________________________
+
+# Authors
+
+Developed by:
+
+Niklas & Robert
+
+University of Lucerne
