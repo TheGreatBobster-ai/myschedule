@@ -4,6 +4,8 @@ import json
 import subprocess
 import sys
 import time
+
+from collections import Counter
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, date
@@ -151,7 +153,7 @@ def run_interactive(indexes: Indexes, rebuild_indexes_fn: Callable[[], Indexes])
         elif choice == "3":
             _flow_remove(indexes, selected)
         elif choice == "4":
-            _flow_conflicts(events)
+            _flow_conflicts(indexes, events)
         elif choice == "5":
             _flow_timetable_week(events)
         elif choice == "6":
@@ -184,16 +186,65 @@ def _print_header(selected: set[str], events: list[dict[str, Any]]) -> None:
     _println(f"Selected courses: {len(selected)} | Selected events: {len(events)}")
 
 
-def _course_label(course: dict[str, Any]) -> str:
-    cid = _safe_str(course.get("course_id")).strip()
-    title = (_safe_str(course.get("title")) or "").strip() or "(no title)"
+def _short_instructors(course: dict[str, Any]) -> str:
     instructors = course.get("instructors", [])
-    if isinstance(instructors, list):
-        instr = ", ".join([_safe_str(x) for x in instructors if _safe_str(x).strip()])
+    if not instructors:
+        return ""
+
+    if not isinstance(instructors, list):
+        instructors = [instructors]
+
+    names = [str(x).strip() for x in instructors if str(x).strip()]
+    if not names:
+        return ""
+
+    # Keep titles/grades, but cut noisy suffixes like "/ Executive MBA"
+    first = names[0].split("/", 1)[0].strip()
+
+    # Optional: shorten if too long (keeps table nice)
+    MAX_LEN = 38
+    if len(first) > MAX_LEN:
+        first = first[: MAX_LEN - 1].rstrip() + "…"
+
+    extra = len(names) - 1
+    return f"{first} +{extra}" if extra > 0 else first
+
+
+def _event_count_for_course(course_id: str, events_by_course_id: dict[str, list[dict[str, Any]]]) -> int:
+    return len(events_by_course_id.get(course_id, []))
+
+
+def _course_label(
+    course: dict[str, Any], events_by_course_id: dict[str, list[dict[str, Any]]], rich: bool = False
+) -> str:
+    cid_raw = _safe_str(course.get("course_id")).strip().upper()
+    title_raw = (_safe_str(course.get("title")) or "").strip() or "(no title)"
+
+    instr_raw = _short_instructors(course)
+    course_type_raw = _safe_str(course.get("type") or course.get("kind") or "").strip()
+    n_events = _event_count_for_course(cid_raw, events_by_course_id)
+
+    if rich and HAS_RICH:
+        cid = f"[bold cyan]{cid_raw}[/]"
+        title = title_raw  # keep neutral (readability)
+        instr = f"[magenta]{instr_raw}[/]" if instr_raw else ""
+        course_type = f"[green]{course_type_raw}[/]" if course_type_raw else ""
+        evs = f"[yellow]{n_events}[/] events"
     else:
-        instr = _safe_str(instructors)
-    instr = instr.strip()
-    return f"{cid} | {title}" + (f" | {instr}" if instr else "")
+        cid = cid_raw
+        title = title_raw
+        instr = instr_raw
+        course_type = course_type_raw
+        evs = f"{n_events} events"
+
+    bits = [cid, title]
+    if instr:
+        bits.append(instr)
+    if course_type:
+        bits.append(course_type)
+    bits.append(evs)
+
+    return " | ".join(bits)
 
 
 def _event_line(ev: dict[str, Any]) -> str:
@@ -212,65 +263,76 @@ def _event_line(ev: dict[str, Any]) -> str:
 
 
 def _flow_search_add(indexes: Indexes, selected: set[str]) -> None:
-    query = _prompt("Search text (e.g., finance): ").strip().lower()
-    if not query:
-        _println("No search text.")
-        return
+    """
+    Search courses and add them. After adding (or already-selected), ask whether
+    user wants to add more courses without returning to main menu.
+    """
+    while True:
+        query = _prompt("Search text or code (e.g., 'finance' or 'FS261107') [blank = back]: ").strip().lower()
+        if not query:
+            return
 
-    matches: list[dict[str, Any]] = []
-    for c in indexes.courses:
-        cid = _safe_str(c.get("course_id")).strip().upper()
-        title = (_safe_str(c.get("title")) or "").strip()
-        instructors = c.get("instructors", [])
-        instr_text = (
-            " ".join([_safe_str(x) for x in instructors]) if isinstance(instructors, list) else _safe_str(instructors)
-        )
-        hay = f"{cid} {title} {instr_text}".lower()
-        if query in hay:
-            matches.append(c)
+        matches: list[dict[str, Any]] = []
+        for c in indexes.courses:
+            cid = _safe_str(c.get("course_id")).strip().upper()
+            title = (_safe_str(c.get("title")) or "").strip()
+            instructors = c.get("instructors", [])
+            instr_text = (
+                " ".join([_safe_str(x) for x in instructors])
+                if isinstance(instructors, list)
+                else _safe_str(instructors)
+            )
+            hay = f"{cid} {title} {instr_text}".lower()
+            if query in hay:
+                matches.append(c)
 
-    if not matches:
-        _println("No results.")
-        return
+        if not matches:
+            _println("No results.")
+            continue
 
-    matches = matches[:20]
+        matches = matches[:20]
 
-    if HAS_RICH:
-        table = Table(title="Search results (max 20)", box=box.SIMPLE)
-        table.add_column("#", justify="right")
-        table.add_column("Course")
-        for i, c in enumerate(matches, start=1):
-            table.add_row(str(i), _course_label(c))
-        console.print(table)
-    else:
-        _println("Search results (max 20):")
-        for i, c in enumerate(matches, start=1):
-            _println(f"{i}) {_course_label(c)}")
+        if HAS_RICH:
+            table = Table(title="Search results (max 20)", box=box.SIMPLE)
+            table.add_column("#", justify="right")
+            table.add_column("Course")
+            for i, c in enumerate(matches, start=1):
+                table.add_row(str(i), _course_label(c, indexes.events_by_course_id, rich=True))
+            console.print(table)
+        else:
+            _println("Search results (max 20):")
+            for i, c in enumerate(matches, start=1):
+                _println(f"{i}) {_course_label(c, indexes.events_by_course_id)}")
 
-    pick = _prompt("Enter number to add (or blank to cancel): ").strip()
-    if not pick:
-        return
-    if not pick.isdigit():
-        _println("Not a number.")
-        return
+        pick = _prompt("Enter number to add [blank = new search]: ").strip()
+        if not pick:
+            # user wants to search again
+            continue
+        if not pick.isdigit():
+            _println("Not a number.")
+            continue
 
-    i = int(pick)
-    if not (1 <= i <= len(matches)):
-        _println("Out of range.")
-        return
+        i = int(pick)
+        if not (1 <= i <= len(matches)):
+            _println("Out of range.")
+            continue
 
-    cid = _safe_str(matches[i - 1].get("course_id")).strip().upper()
-    if not cid:
-        _println("Invalid course_id.")
-        return
+        cid = _safe_str(matches[i - 1].get("course_id")).strip().upper()
+        if not cid:
+            _println("Invalid course_id.")
+            continue
 
-    if cid in selected:
-        _println(f"Already selected: {cid}")
-        return
+        if cid in selected:
+            _println(f"Already selected: {cid}")
+        else:
+            selected.add(cid)
+            save_selected_course_ids(selected)
+            _println(f"Added: {cid}")
 
-    selected.add(cid)
-    save_selected_course_ids(selected)
-    _println(f"Added: {cid}")
+        more = _prompt("Add another course? [Y/n]: ").strip().lower()
+        if more == "n":
+            return
+        # else loop continues (new search)
 
 
 def _flow_view_selected(indexes: Indexes, selected: set[str]) -> None:
@@ -278,24 +340,35 @@ def _flow_view_selected(indexes: Indexes, selected: set[str]) -> None:
         _println("No courses selected.")
         return
 
-    items = []
-    for cid in sorted(selected):
-        c = indexes.course_by_id.get(cid)
-        if c:
-            items.append(_course_label(c))
-        else:
-            items.append(f"{cid} | (not found in courses.json)")
-
     if HAS_RICH:
         table = Table(title="Selected courses", box=box.SIMPLE)
         table.add_column("Course")
-        for x in items:
-            table.add_row(x)
+
+        for cid in sorted(selected):
+            c = indexes.course_by_id.get(cid)
+            if c:
+                table.add_row(_course_label(c, indexes.events_by_course_id, rich=True))
+            else:
+                missing_events = len(indexes.events_by_course_id.get(cid, []))
+                table.add_row(f"[bold cyan]{cid}[/] | (not found in courses.json) | {missing_events} events")
+
         console.print(table)
-    else:
-        _println("Selected courses:")
-        for x in items:
-            _println(f"- {x}")
+        return
+
+    # Fallback: plain terminal output
+    items: list[str] = []
+    for cid in sorted(selected):
+        c = indexes.course_by_id.get(cid)
+        if c:
+            items.append(_course_label(c, indexes.events_by_course_id))
+        else:
+            items.append(
+                f"{cid} | (not found in courses.json) | {len(indexes.events_by_course_id.get(cid, []))} events"
+            )
+
+    _println("Selected courses:")
+    for x in items:
+        _println(f"- {x}")
 
 
 def _flow_remove(indexes: Indexes, selected: set[str]) -> None:
@@ -303,40 +376,51 @@ def _flow_remove(indexes: Indexes, selected: set[str]) -> None:
         _println("No courses selected.")
         return
 
-    ids = sorted(selected)
-    if HAS_RICH:
-        table = Table(title="Remove course", box=box.SIMPLE)
-        table.add_column("#", justify="right")
-        table.add_column("Course")
-        for i, cid in enumerate(ids, start=1):
-            c = indexes.course_by_id.get(cid, {"course_id": cid, "title": ""})
-            table.add_row(str(i), _course_label(c))
-        console.print(table)
-    else:
-        _println("Remove course:")
-        for i, cid in enumerate(ids, start=1):
-            c = indexes.course_by_id.get(cid, {"course_id": cid, "title": ""})
-            _println(f"{i}) {_course_label(c)}")
+    while True:
+        if not selected:
+            _println("No courses selected.")
+            return
 
-    pick = _prompt("Enter number to remove (or blank to cancel): ").strip()
-    if not pick:
-        return
-    if not pick.isdigit():
-        _println("Not a number.")
-        return
+        ids = sorted(selected)
 
-    i = int(pick)
-    if not (1 <= i <= len(ids)):
-        _println("Out of range.")
-        return
+        if HAS_RICH:
+            table = Table(title="Remove course", box=box.SIMPLE)
+            table.add_column("#", justify="right")
+            table.add_column("Course")
+            for i, cid in enumerate(ids, start=1):
+                c = indexes.course_by_id.get(cid, {"course_id": cid, "title": ""})
+                table.add_row(str(i), _course_label(c, indexes.events_by_course_id, rich=True))
+            console.print(table)
+        else:
+            _println("Remove course:")
+            for i, cid in enumerate(ids, start=1):
+                c = indexes.course_by_id.get(cid, {"course_id": cid, "title": ""})
+                _println(f"{i}) {_course_label(c, indexes.events_by_course_id)}")
 
-    cid = ids[i - 1]
-    selected.remove(cid)
-    save_selected_course_ids(selected)
-    _println(f"Removed: {cid}")
+        pick = _prompt("Enter number to remove (or blank to cancel): ").strip()
+        if not pick:
+            return
+        if not pick.isdigit():
+            _println("Not a number.")
+            continue
+
+        idx = int(pick)
+        if not (1 <= idx <= len(ids)):
+            _println("Out of range.")
+            continue
+
+        cid = ids[idx - 1]
+        selected.remove(cid)
+        save_selected_course_ids(selected)
+        _println(f"Removed: {cid}")
+
+        more = _prompt("Remove another course? [Y/n]: ").strip().lower()
+        if more == "n":
+            return
+        # else: loop continues and shows updated list
 
 
-def _flow_conflicts(events: list[dict[str, Any]]) -> None:
+def _flow_conflicts(indexes: Indexes, events: list[dict[str, Any]]) -> None:
     if not events:
         _println("No selected events.")
         return
@@ -346,10 +430,107 @@ def _flow_conflicts(events: list[dict[str, Any]]) -> None:
         _println("No conflicts found.")
         return
 
+    # Sort for stable order
     confs = sorted(confs, key=lambda p: (_safe_str(p[0].get("date")), _safe_str(p[0].get("start"))))
-    _println(f"Conflicts found: {len(confs)}")
+
+    def _course_pair_label(cid: str, rich: bool) -> str:
+        c = indexes.course_by_id.get(cid, {"course_id": cid, "title": "", "type": ""})
+
+        title = (_safe_str(c.get("title")) or "").strip()
+        ctype = (_safe_str(c.get("type")) or "").strip()
+
+        if rich and HAS_RICH:
+            cid_s = f"[bold cyan]{cid}[/]"
+            title_s = title
+            type_s = f"[green]{ctype}[/]" if ctype else ""
+        else:
+            cid_s = cid
+            title_s = title
+            type_s = ctype
+
+        parts = [cid_s]
+        if title_s:
+            parts.append(title_s)
+        if type_s:
+            parts.append(type_s)
+
+        return " | ".join(parts)
+
+    def _pair_key(a: dict[str, Any], b: dict[str, Any]) -> tuple[str, str]:
+        ca = _safe_str(a.get("course_id")).strip().upper()
+        cb = _safe_str(b.get("course_id")).strip().upper()
+        return (ca, cb) if ca <= cb else (cb, ca)
+
+    # Group conflicts by course-pair
+    by_pair: dict[tuple[str, str], list[tuple[dict[str, Any], dict[str, Any]]]] = defaultdict(list)
+    involved_courses: set[str] = set()
+
     for a, b in confs:
-        _println(f"- {_safe_str(a.get('date'))}: {_event_line(a)}  <->  {_event_line(b)}")
+        ca = _safe_str(a.get("course_id")).strip().upper()
+        cb = _safe_str(b.get("course_id")).strip().upper()
+        if not ca or not cb:
+            continue
+        involved_courses.add(ca)
+        involved_courses.add(cb)
+        by_pair[_pair_key(a, b)].append((a, b))
+
+    pairs_sorted = sorted(by_pair.items(), key=lambda item: (-len(item[1]), item[0]))
+
+    total_confs = len(confs)
+    total_courses = len(involved_courses)
+
+    _println(f"Conflicts found: {total_confs}")
+    _println(f"Courses involved in conflicts: {total_courses}")
+
+    # Loop so user can inspect multiple pairs without re-entering menu
+    while True:
+        _println("\nConflict overview (by course pair):")
+
+        if HAS_RICH:
+            table = Table(box=box.SIMPLE, title="Conflict pairs")
+            table.add_column("#", justify="right")
+            table.add_column("Pair")
+            table.add_column("Conflicts", justify="right")
+
+            for i, ((c1, c2), lst) in enumerate(pairs_sorted, start=1):
+                pair_label = f"{_course_pair_label(c1, rich=True)}  ↔  {_course_pair_label(c2, rich=True)}"
+                table.add_row(str(i), pair_label, f"[yellow]{len(lst)}[/]")
+
+            table.add_row(str(len(pairs_sorted) + 1), "[bold]Show ALL conflicts[/]", f"[yellow]{total_confs}[/]")
+            console.print(table)
+        else:
+            for i, ((c1, c2), lst) in enumerate(pairs_sorted, start=1):
+                _println(
+                    f"{i}) {_course_pair_label(c1, rich=False)}  <->  {_course_pair_label(c2, rich=False)}  ({len(lst)} conflicts)"
+                )
+            _println(f"{len(pairs_sorted)+1}) Show ALL conflicts ({total_confs})")
+
+        pick = _prompt("Select number for details, or 0 to go back: ").strip()
+        if pick == "0" or pick == "":
+            return
+        if not pick.isdigit():
+            _println("Not a number.")
+            continue
+
+        choice = int(pick)
+        if choice == len(pairs_sorted) + 1:
+            # Show all conflicts in detail
+            _println(f"\n=== All conflicts ({total_confs}) ===")
+            for k, (a, b) in enumerate(confs, start=1):
+                _println(f"{k}. {_safe_str(a.get('date'))}: {_event_line(a)}  <->  {_event_line(b)}")
+            _prompt("\nPress Enter to go back...")
+            continue
+
+        if not (1 <= choice <= len(pairs_sorted)):
+            _println("Out of range.")
+            continue
+
+        (c1, c2), lst = pairs_sorted[choice - 1]
+        _println(f"\n=== Conflicts: {c1} ↔ {c2} ({len(lst)}) ===")
+        for k, (a, b) in enumerate(lst, start=1):
+            _println(f"{k}. {_safe_str(a.get('date'))}: {_event_line(a)}  <->  {_event_line(b)}")
+
+        _prompt("\nPress Enter to go back...")
 
 
 def _flow_agenda(events: list[dict[str, Any]]) -> None:
