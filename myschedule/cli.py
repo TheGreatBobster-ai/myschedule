@@ -29,7 +29,15 @@ def _processed_dir() -> Path:
 
 
 def _load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    """
+    Load JSON from file. If file is missing or invalid, return [] as safe default.
+    """
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return []
 
 
 def _build_indexes() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
