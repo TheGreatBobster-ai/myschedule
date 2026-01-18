@@ -1,3 +1,13 @@
+"""
+Tests for iCalendar (.ics) export.
+
+The export must:
+- Create a valid .ics file
+- Contain a VCALENDAR wrapper
+- Contain at least one VEVENT entry
+- Include a readable SUMMARY field
+"""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +30,7 @@ class TestExportICS(unittest.TestCase):
             }
         ]
 
+        # Use temporary directory to avoid writing to user filesystem
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "out.ics"
             n = export_events_to_ics(events, out)

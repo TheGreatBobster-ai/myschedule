@@ -1,8 +1,9 @@
 """
 Conflict detection.
 
-Given events of selected courses, detect overlaps on the same date.
-Overlap rule:
+Given a list of events, detect time overlaps on the same date.
+
+Overlap rule (touching endpoints is NOT a conflict):
     start < other_end AND end > other_start
 """
 
@@ -13,8 +14,9 @@ from typing import Any
 
 def _time_to_minutes(hhmm: str) -> int:
     """
-    Convert 'HH:MM' to minutes since midnight.
-    Raises ValueError for invalid formats.
+    Convert 'HH:MM' into minutes since midnight.
+
+    Raises ValueError if the format or time values are invalid.
     """
     parts = hhmm.strip().split(":")
     if len(parts) != 2:
@@ -27,15 +29,19 @@ def _time_to_minutes(hhmm: str) -> int:
 
 
 def _overlaps(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
-    # Overlap definition from spec:
-    # start < other_end AND end > other_start
+    """
+    Return True if two time intervals overlap (end == start is allowed, no conflict).
+    """
     return a_start < b_end and a_end > b_start
 
 
 def find_conflicts(events: list[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """
-    Find overlapping event pairs (A,B), each pair appears once (i<j).
-    Overlap only if same date AND time intervals overlap.
+    Find overlapping event pairs (ev1, ev2).
+
+    Each pair appears once (i < j). Two events conflict only if:
+    - same date AND
+    - their time intervals overlap
     """
     conflicts: list[tuple[dict[str, Any], dict[str, Any]]] = []
 

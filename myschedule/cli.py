@@ -1,12 +1,18 @@
 """
 CLI (Command Line Interface).
 
-This module will parse user commands like:
-- search <text>
-- add <course_id>
-- remove <course_id>
-- conflicts
-- export <file.ics>
+This module provides quick terminal commands for power users and for testing, e.g.:
+
+    myschedule search <text>
+    myschedule add <course_id>
+    myschedule remove <course_id>
+    myschedule conflicts
+    myschedule export <file.ics>
+    myschedule interactive
+
+Note:
+- The interactive UI lives in myschedule/interactive.py
+- This CLI is intentionally simple and prints plain text (no rich formatting)
 """
 
 from __future__ import annotations
@@ -15,7 +21,6 @@ import argparse
 import json
 from collections import defaultdict
 from pathlib import Path
-from re import sub
 from typing import Any
 
 from myschedule.conflicts import find_conflicts
@@ -24,13 +29,19 @@ from myschedule.storage import load_selected_course_ids, save_selected_course_id
 
 
 def _processed_dir() -> Path:
+    """
+    Return the directory that contains processed JSON data (courses/events).
+    """
     base_dir = Path(__file__).resolve().parent
     return base_dir / "data" / "processed"
 
 
 def _load_json(path: Path) -> Any:
     """
-    Load JSON from file. If file is missing or invalid, return [] as safe default.
+    Load JSON from a file.
+
+    CLI behavior: never crash if data is missing or broken.
+    Instead, return [] as a safe default so commands can still run.
     """
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -46,6 +57,7 @@ def _build_indexes() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], d
     - courses list
     - course_by_id dict
     - events_by_course_id dict
+    => Avoids repeatedly scanning large lists for every command.
     """
     processed = _processed_dir()
     courses_path = processed / "courses.json"
@@ -73,6 +85,9 @@ def _build_indexes() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], d
 
 
 def _cmd_search(args: argparse.Namespace, courses: list[dict[str, Any]]) -> int:
+    """
+    Search courses by substring match in course_id, title, or instructor names.
+    """
     query = (args.text or "").strip().lower()
     if not query:
         print("Please provide a search text.")
@@ -106,6 +121,9 @@ def _cmd_search(args: argparse.Namespace, courses: list[dict[str, Any]]) -> int:
 
 
 def _cmd_add(args: argparse.Namespace, course_by_id: dict[str, dict[str, Any]]) -> int:
+    """
+    Add a course_id to the persistent selection (selected_courses.json).
+    """
     cid = (args.course_id or "").strip().upper()
     if not cid:
         print("Please provide a course_id.")
@@ -127,6 +145,9 @@ def _cmd_add(args: argparse.Namespace, course_by_id: dict[str, dict[str, Any]]) 
 
 
 def _cmd_remove(args: argparse.Namespace) -> int:
+    """
+    Remove a course_id from the persistent selection (selected_courses.json).
+    """
     cid = (args.course_id or "").strip().upper()
     if not cid:
         print("Please provide a course_id.")
@@ -146,6 +167,9 @@ def _cmd_remove(args: argparse.Namespace) -> int:
 def _selected_events(
     selected_ids: set[str], events_by_course_id: dict[str, list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
+    """
+    Collect all event dicts for the currently selected courses.
+    """
     out: list[dict[str, Any]] = []
     for cid in sorted(selected_ids):
         out.extend(events_by_course_id.get(cid, []))
@@ -153,6 +177,9 @@ def _selected_events(
 
 
 def _cmd_conflicts(args: argparse.Namespace, events_by_course_id: dict[str, list[dict[str, Any]]]) -> int:
+    """
+    Print all detected conflicts among selected events.
+    """
     selected = load_selected_course_ids()
     events = _selected_events(selected, events_by_course_id)
 
@@ -187,6 +214,9 @@ def _cmd_conflicts(args: argparse.Namespace, events_by_course_id: dict[str, list
 
 
 def _cmd_export(args: argparse.Namespace, events_by_course_id: dict[str, list[dict[str, Any]]]) -> int:
+    """
+    Export selected events into an iCalendar (.ics) file.
+    """
     selected = load_selected_course_ids()
     events = _selected_events(selected, events_by_course_id)
 
@@ -205,6 +235,9 @@ def _cmd_export(args: argparse.Namespace, events_by_course_id: dict[str, list[di
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """
+    Build the argparse CLI parser with sub-commands.
+    """
     parser = argparse.ArgumentParser(prog="myschedule", description="MySchedule CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -228,6 +261,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """
+    CLI entry point. Parses args, dispatches to command handlers,
+    and exits via SystemExit with a return code.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
 

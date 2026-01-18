@@ -1,3 +1,12 @@
+"""
+Tests for CLI entry points and storage roundtrip logic.
+
+These tests focus on:
+- Basic CLI argument validation (search requires text)
+- Safe persistence of selected courses using a temporary file
+  (to avoid touching real user data during tests)
+"""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,8 +23,8 @@ class TestCLI(unittest.TestCase):
         self.assertNotEqual(ctx.exception.code, 0)
 
     def test_cli_add_and_remove_roundtrip(self) -> None:
-        # We don't want to touch real selected_courses.json, so patch by passing temp path
-        # -> easiest: directly test storage here (CLI uses default path in package)
+        # Do not touch the real selected_courses.json used by users.
+        # Instead, use a temporary file to test persistence logic safely in isolation.
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "selected_courses.json"
             storage.save_selected_course_ids(set(), p)

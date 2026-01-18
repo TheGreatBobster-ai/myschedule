@@ -1,3 +1,7 @@
+# the requirements necessary to run the myschedule application; 
+# rich is not necessary for core functionality as the whole app has separate modes for with and without rich,
+# but rich adds improved UX features in the interactive mode and is highly recommended.
+
 requests
 beautifulsoup4
 rich

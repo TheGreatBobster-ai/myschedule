@@ -1,7 +1,7 @@
 """
 iCalendar (.ics) export.
 
-We convert selected events into a calendar file that can be imported into:
+Converts selected events into a standard iCalendar file that can be imported into:
 - Google Calendar
 - Outlook
 - Apple Calendar
@@ -69,6 +69,8 @@ def export_events_to_ics(events: list[dict[str, Any]], out_path: str | Path) -> 
 
         lines.append("BEGIN:VEVENT")
         lines.append(f"UID:{_ics_escape(uid)}")
+
+        # UTC timestamp required by the iCalendar specification
         dtstamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         lines.append(f"DTSTAMP:{dtstamp}")
         lines.append(f"DTSTART:{dtstart}")

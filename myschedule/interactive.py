@@ -36,8 +36,8 @@ This file intentionally centralizes TUI logic for maintainability.
 #    9.2) View Selected
 #    9.3) Remove
 #    9.4) Conflicts
-#    9.5) Timetable (Week View)
-#    9.6) Agenda (Paged / All)
+#    9.5) Agenda (Paged / All)
+#    9.6) Timetable (Week View)
 #    9.7) Export (.ics)
 #    9.8) Update Data (scrape + parse + metadata)
 # 10) Subprocess / System Layer (scrape/parse subprocess runners)
@@ -53,9 +53,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 
-from collections import Counter
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta
@@ -85,6 +83,8 @@ except Exception:  # pragma: no cover
 # 2) Paths & Global Constants
 # =========================
 
+# Package-relative paths so the app works regardless of current working directory.
+# Raw = cached HTML pages, Processed = parsed JSON outputs, Metadata = scrape info.
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROCESSED_DIR = PACKAGE_DIR / "data" / "processed"
@@ -99,6 +99,14 @@ META_PATH = PROCESSED_DIR / "metadata.json"
 
 @dataclass
 class Indexes:
+    """
+    In-memory indexes built from processed JSON files.
+
+    - courses: list of all courses (raw dicts as loaded from courses.json)
+    - course_by_id: lookup by course_id
+    - events_by_course_id: course_id -> list of event dicts
+    """
+
     courses: list[dict[str, Any]]
     course_by_id: dict[str, dict[str, Any]]
     events_by_course_id: dict[str, list[dict[str, Any]]]
@@ -110,19 +118,35 @@ class Indexes:
 
 
 def _println(msg: str = "") -> None:
+    """
+    Print a line to the terminal (Rich if available, otherwise plain print).
+    """
     if HAS_RICH:
+        assert console is not None  # Pylance: console exists when HAS_RICH is Tru
         console.print(msg)
     else:
         print(msg)
 
 
+def _print_separator() -> None:
+    """Visual separator between menu screens."""
+    _println("\n" + "-" * 60 + "\n")
+
+
 def _prompt(msg: str) -> str:
+    """
+    Read user input (Rich input if available, otherwise built-in input).
+    """
     if HAS_RICH:
-        return console.input(msg)
+        assert console is not None  # Pylance: console exists when HAS_RICH is True
+        return console.input(msg, markup=False)
     return input(msg)
 
 
 def _safe_str(x: Any) -> str:
+    """
+    Convert None to '' and everything else to str (avoids many None checks).
+    """
     return "" if x is None else str(x)
 
 
@@ -132,18 +156,44 @@ def _safe_str(x: Any) -> str:
 
 
 def _load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    """
+    Load JSON from file.
+
+    Returns an empty list if the file is missing or invalid,
+    so the interactive app can continue without crashing.
+    """
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return []
 
 
 def _has_processed_data() -> bool:
+    """
+    Check whether processed course and event data already exists.
+
+    Used on startup to decide whether an initial scrape is required.
+    """
     return (PROCESSED_DIR / "courses.json").exists() and (PROCESSED_DIR / "events.json").exists()
 
 
 def build_indexes() -> Indexes:
+    """
+    Load processed JSON files and build in-memory lookup structures.
+
+    Creates:
+    - list of all courses
+    - dict: course_id -> course
+    - dict: course_id -> list of events
+
+    Returns empty indexes if no processed data exists yet (first run).
+    """
     courses_path = PROCESSED_DIR / "courses.json"
     events_path = PROCESSED_DIR / "events.json"
 
-    # Onboarding safety: no data yet
+    # Onboarding safety: allow interactive mode even before first scrape
     if not courses_path.exists() or not events_path.exists():
         return Indexes(
             courses=[],
@@ -177,6 +227,11 @@ def build_indexes() -> Indexes:
 
 
 def _read_metadata() -> dict[str, Any]:
+    """
+    Load scrape metadata (semester, timestamp, counts).
+
+    Returns empty dict if metadata.json does not exist or is invalid.
+    """
     if not META_PATH.exists():
         return {}
     try:
@@ -186,6 +241,11 @@ def _read_metadata() -> dict[str, Any]:
 
 
 def _write_metadata(semester: str, courses_count: int, events_count: int) -> None:
+    """
+    Write metadata.json after a successful scrape + parse run.
+
+    Stores semester, timestamp, and dataset size for display in the UI.
+    """
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     data = {
         "last_scraped": datetime.now().isoformat(timespec="seconds"),
@@ -204,30 +264,45 @@ def _write_metadata(semester: str, courses_count: int, events_count: int) -> Non
 def _selected_events(
     selected_ids: set[str], events_by_course_id: dict[str, list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
+    """
+    Collect all events belonging to the currently selected courses.
+
+    Events are merged across courses and sorted by date and start time
+    for consistent display in agenda and timetable views.
+    """
     out: list[dict[str, Any]] = []
     for cid in sorted(selected_ids):
         out.extend(events_by_course_id.get(cid, []))
+    # Global chronological order across all selected courses
     out.sort(key=lambda ev: (_safe_str(ev.get("date")), _safe_str(ev.get("start"))))
     return out
 
 
 def _print_header(selected: set[str], events: list[dict[str, Any]]) -> None:
+    """
+    Print the interactive header with metadata and current selection stats.
+    """
     meta = _read_metadata()
     if meta:
         last = _safe_str(meta.get("last_scraped"))
         sem = _safe_str(meta.get("semester"))
         c = _safe_str(meta.get("courses"))
         e = _safe_str(meta.get("events"))
-        _println(f"\n=== MySchedule (interactive) ===")
+        _println(f"\n=== MySchedule (interactive) ===")  # noqa: F541
         _println(f"Data: semester={sem} | last_scraped={last} | courses={c} | events={e}")
     else:
-        _println(f"\n=== MySchedule (interactive) ===")
+        _println(f"\n=== MySchedule (interactive) ===")  # noqa: F541
         _println("Data: (no metadata yet) – run [8] Update data once to generate metadata.json")
 
     _println(f"Selected courses: {len(selected)} | Selected events: {len(events)}")
 
 
 def _short_instructors(course: dict[str, Any]) -> str:
+    """
+    Build a short instructor label for compact table display.
+
+    Keeps only the first instructor and appends '+N' if more exist.
+    """
     instructors = course.get("instructors", [])
     if not instructors:
         return ""
@@ -252,12 +327,21 @@ def _short_instructors(course: dict[str, Any]) -> str:
 
 
 def _event_count_for_course(course_id: str, events_by_course_id: dict[str, list[dict[str, Any]]]) -> int:
+    """
+    Return number of scheduled events for a given course.
+    """
     return len(events_by_course_id.get(course_id, []))
 
 
 def _course_label(
     course: dict[str, Any], events_by_course_id: dict[str, list[dict[str, Any]]], rich: bool = False
 ) -> str:
+    """
+    Build a compact, human-readable label for a course.
+
+    Combines course_id, title, instructors, type, and event count.
+    Supports optional Rich markup for colored terminal output.
+    """
     cid_raw = _safe_str(course.get("course_id")).strip().upper()
     title_raw = (_safe_str(course.get("title")) or "").strip() or "(no title)"
 
@@ -265,6 +349,7 @@ def _course_label(
     course_type_raw = _safe_str(course.get("type") or course.get("kind") or "").strip()
     n_events = _event_count_for_course(cid_raw, events_by_course_id)
 
+    # Switch between colored Rich output and plain text fallback
     if rich and HAS_RICH:
         cid = f"[bold cyan]{cid_raw}[/]"
         title = title_raw  # keep neutral (readability)
@@ -289,6 +374,11 @@ def _course_label(
 
 
 def _event_line(ev: dict[str, Any]) -> str:
+    """
+    Format a single event into a compact one-line string for display.
+
+    Example: '10:15-12:00 | FS261110 | Public Economics (lecture) @ HS 8'
+    """
     cid = _safe_str(ev.get("course_id")).strip()
     title = (_safe_str(ev.get("title")) or "").strip()
     start = _safe_str(ev.get("start")).strip()
@@ -321,6 +411,7 @@ def _conflicts_if_added(
     if not cand_events or not selected_ids:
         return []
 
+    # Collect all events of currently selected courses
     selected_events: list[dict[str, Any]] = []
     for cid in selected_ids:
         selected_events.extend(events_by_course_id.get(cid, []))
@@ -364,14 +455,15 @@ def _show_candidate_conflict_details(
 
     _println(f"\nConflicts for candidate course:\n- {cand_label}\n")
 
-    # Overview
+    # Overview: one line per conflicting course
+
     for other_cid in sorted(by_other.keys()):
         other_course = indexes.course_by_id.get(other_cid, {"course_id": other_cid, "title": ""})
         other_label = _course_label(other_course, indexes.events_by_course_id)
         n = len(by_other[other_cid])
         _println(f"* {other_label}  →  {n} conflicts")
 
-    # Details
+    # Detailed list of every conflicting event pair
     _println("\nDetails:")
     i = 1
     for other_cid in sorted(by_other.keys()):
@@ -399,7 +491,8 @@ def _show_candidate_conflict_details(
 
 def run_interactive(indexes: Indexes, rebuild_indexes_fn: Callable[[], Indexes]) -> None:
     """
-    Interactive menu loop with optional "Update data" (scrape+parse+reload).
+    Interactive menu loop with access to 8 different flows, all individual flows are in
+    '9) menu flows', that is the next section in this file.
     """
 
     # --- onboarding: ensure data exists ---
@@ -437,8 +530,10 @@ def run_interactive(indexes: Indexes, rebuild_indexes_fn: Callable[[], Indexes])
             "[7] Export .ics\n"
             "[8] Update data (re-scrape UniLU)\n"
             "[0] Exit\n"
-            "Select: "
+            "\nSelect: "
         ).strip()
+
+        _print_separator()
 
         if choice == "0":
             _println("Bye.")
@@ -481,9 +576,16 @@ def _flow_search_add(indexes: Indexes, selected: set[str]) -> None:
     user wants to add more courses without returning to main menu.
     """
     while True:
-        query = _prompt("Search text or code (e.g., 'finance' or 'FS261107') [blank = back]: ").strip().lower()
-        if not query:
+        query = (
+            _prompt("Search text or code (e.g., 'finance' or 'FS261107') [blank = new search, 0 = back]: ")
+            .strip()
+            .lower()
+        )
+
+        if query == "0":
             return
+        if not query:
+            continue
 
         matches: list[dict[str, Any]] = []
         for c in indexes.courses:
@@ -506,20 +608,23 @@ def _flow_search_add(indexes: Indexes, selected: set[str]) -> None:
         matches = matches[:20]
 
         if HAS_RICH:
-            table = Table(title="Search results (max 20)", box=box.SIMPLE)
+            table = Table(title="Search results (max 20)", box=box.SIMPLE)  # type: ignore
             table.add_column("#", justify="right")
             table.add_column("Course")
             for i, c in enumerate(matches, start=1):
                 table.add_row(str(i), _course_label(c, indexes.events_by_course_id, rich=True))
-            console.print(table)
+            console.print(table)  # type: ignore
         else:
             _println("Search results (max 20):")
             for i, c in enumerate(matches, start=1):
                 _println(f"{i}) {_course_label(c, indexes.events_by_course_id)}")
 
-        pick = _prompt("Enter number to add [blank = new search]: ").strip()
+        # User chooses which course to add by index
+        pick = _prompt("Enter number to add [blank = new search, 0 = back]: ").strip()
+
+        if pick == "0":
+            return
         if not pick:
-            # user wants to search again
             continue
         if not pick.isdigit():
             _println("Not a number.")
@@ -538,7 +643,9 @@ def _flow_search_add(indexes: Indexes, selected: set[str]) -> None:
         if cid in selected:
             _println(f"Already selected: {cid}")
         else:
+
             # --- conflict preview before adding ---
+            # Simulate adding the course and warn if it creates schedule overlaps
             pairs = _conflicts_if_added(cid, selected, indexes.events_by_course_id)
 
             if pairs:
@@ -572,6 +679,7 @@ def _flow_search_add(indexes: Indexes, selected: set[str]) -> None:
                 save_selected_course_ids(selected)
                 _println(f"Added: {cid}")
 
+        # Ask whether user wants to continue adding courses
         more = _prompt("Add another course? [Y/n]: ").strip().lower()
         if more == "n":
             return
@@ -582,12 +690,17 @@ def _flow_search_add(indexes: Indexes, selected: set[str]) -> None:
 
 
 def _flow_view_selected(indexes: Indexes, selected: set[str]) -> None:
+    """
+    Display all currently selected courses.
+
+    Uses a rich table if available, otherwise falls back to plain text output.
+    """
     if not selected:
         _println("No courses selected.")
         return
 
     if HAS_RICH:
-        table = Table(title="Selected courses", box=box.SIMPLE)
+        table = Table(title="Selected courses", box=box.SIMPLE)  # type: ignore
         table.add_column("Course")
 
         for cid in sorted(selected):
@@ -598,10 +711,10 @@ def _flow_view_selected(indexes: Indexes, selected: set[str]) -> None:
                 missing_events = len(indexes.events_by_course_id.get(cid, []))
                 table.add_row(f"[bold cyan]{cid}[/] | (not found in courses.json) | {missing_events} events")
 
-        console.print(table)
+        console.print(table)  # type: ignore
         return
 
-    # Fallback: plain terminal output
+    # Fallback: plain terminal output (no Rich installed)
     items: list[str] = []
     for cid in sorted(selected):
         c = indexes.course_by_id.get(cid)
@@ -621,25 +734,34 @@ def _flow_view_selected(indexes: Indexes, selected: set[str]) -> None:
 
 
 def _flow_remove(indexes: Indexes, selected: set[str]) -> None:
+    """
+    Interactive removal flow for selected courses.
+
+    Shows the current selection as a numbered list and lets the user remove
+    one or multiple courses. Uses Rich tables if available, otherwise prints
+    plain text.
+    """
     if not selected:
         _println("No courses selected.")
         return
 
     while True:
+        # Selection may become empty after removals
         if not selected:
             _println("No courses selected.")
             return
 
         ids = sorted(selected)
 
+        # Display numbered list of selected courses
         if HAS_RICH:
-            table = Table(title="Remove course", box=box.SIMPLE)
+            table = Table(title="Remove course", box=box.SIMPLE)  # type: ignore
             table.add_column("#", justify="right")
             table.add_column("Course")
             for i, cid in enumerate(ids, start=1):
                 c = indexes.course_by_id.get(cid, {"course_id": cid, "title": ""})
                 table.add_row(str(i), _course_label(c, indexes.events_by_course_id, rich=True))
-            console.print(table)
+            console.print(table)  # type: ignore
         else:
             _println("Remove course:")
             for i, cid in enumerate(ids, start=1):
@@ -658,6 +780,7 @@ def _flow_remove(indexes: Indexes, selected: set[str]) -> None:
             _println("Out of range.")
             continue
 
+        # Remove selected course ID and persist it immediately
         cid = ids[idx - 1]
         selected.remove(cid)
         save_selected_course_ids(selected)
@@ -673,6 +796,12 @@ def _flow_remove(indexes: Indexes, selected: set[str]) -> None:
 
 
 def _flow_conflicts(indexes: Indexes, events: list[dict[str, Any]]) -> None:
+    """
+    Interactive conflict inspection flow.
+
+    Detects schedule conflicts among selected events and lets the user
+    explore them grouped by course pairs or as a full list.
+    """
     if not events:
         _println("No selected events.")
         return
@@ -686,6 +815,9 @@ def _flow_conflicts(indexes: Indexes, events: list[dict[str, Any]]) -> None:
     confs = sorted(confs, key=lambda p: (_safe_str(p[0].get("date")), _safe_str(p[0].get("start"))))
 
     def _course_pair_label(cid: str, rich: bool) -> str:
+        """
+        Build a compact label for a course (id | title | type) for UI display.
+        """
         c = indexes.course_by_id.get(cid, {"course_id": cid, "title": "", "type": ""})
 
         title = (_safe_str(c.get("title")) or "").strip()
@@ -709,6 +841,11 @@ def _flow_conflicts(indexes: Indexes, events: list[dict[str, Any]]) -> None:
         return " | ".join(parts)
 
     def _pair_key(a: dict[str, Any], b: dict[str, Any]) -> tuple[str, str]:
+        """
+        Build a stable (courseA, courseB) key independent of order.
+
+        Ensures (A,B) and (B,A) are treated as the same conflict pair.
+        """
         ca = _safe_str(a.get("course_id")).strip().upper()
         cb = _safe_str(b.get("course_id")).strip().upper()
         return (ca, cb) if ca <= cb else (cb, ca)
@@ -739,7 +876,7 @@ def _flow_conflicts(indexes: Indexes, events: list[dict[str, Any]]) -> None:
         _println("\nConflict overview (by course pair):")
 
         if HAS_RICH:
-            table = Table(box=box.SIMPLE, title="Conflict pairs")
+            table = Table(box=box.SIMPLE, title="Conflict pairs")  # type: ignore
             table.add_column("#", justify="right")
             table.add_column("Pair")
             table.add_column("Conflicts", justify="right")
@@ -748,8 +885,9 @@ def _flow_conflicts(indexes: Indexes, events: list[dict[str, Any]]) -> None:
                 pair_label = f"{_course_pair_label(c1, rich=True)}  ↔  {_course_pair_label(c2, rich=True)}"
                 table.add_row(str(i), pair_label, f"[yellow]{len(lst)}[/]")
 
+            # Extra option: show complete flat list
             table.add_row(str(len(pairs_sorted) + 1), "[bold]Show ALL conflicts[/]", f"[yellow]{total_confs}[/]")
-            console.print(table)
+            console.print(table)  # type: ignore
         else:
             for i, ((c1, c2), lst) in enumerate(pairs_sorted, start=1):
                 _println(
@@ -765,6 +903,8 @@ def _flow_conflicts(indexes: Indexes, events: list[dict[str, Any]]) -> None:
             continue
 
         choice = int(pick)
+
+        # Show flat list of all conflicts
         if choice == len(pairs_sorted) + 1:
             # Show all conflicts in detail
             _println(f"\n=== All conflicts ({total_confs}) ===")
@@ -777,6 +917,7 @@ def _flow_conflicts(indexes: Indexes, events: list[dict[str, Any]]) -> None:
             _println("Out of range.")
             continue
 
+        # Show conflicts for one specific course pair
         (c1, c2), lst = pairs_sorted[choice - 1]
         _println(f"\n=== Conflicts: {c1} ↔ {c2} ({len(lst)}) ===")
         for k, (a, b) in enumerate(lst, start=1):
@@ -785,18 +926,30 @@ def _flow_conflicts(indexes: Indexes, events: list[dict[str, Any]]) -> None:
         _prompt("\nPress Enter to go back...")
 
 
-#    9.5) Timetable (Week View)
+#    9.5) Agenda (Paged / All)
 
 
 def _flow_agenda(events: list[dict[str, Any]]) -> None:
+    """
+    Interactive agenda view (grouped by week).
+
+    Displays all selected events grouped by ISO calendar weeks.
+    Events involved in time conflicts are highlighted.
+    Supports paged display (4 weeks at a time) or full list.
+    """
     if not events:
         _println("No selected events.")
         return
 
-    # --- build conflict markers ---
+    # Step 1: Precompute all conflicts to mark overlapping events
     conf_pairs = find_conflicts(events)
 
     def event_key(ev: dict[str, Any]) -> tuple[str, str, str, str]:
+        """
+        Stable event identifier used for conflict marking.
+
+        We avoid relying on event_id and instead use core time identity.
+        """
         return (
             _safe_str(ev.get("date")),
             _safe_str(ev.get("start")),
@@ -810,6 +963,7 @@ def _flow_agenda(events: list[dict[str, Any]]) -> None:
         conflict_keys.add(event_key(b))
 
     def fmt_event(ev: dict[str, Any]) -> str:
+        """Format one event line and highlight it if it is part of a conflict."""
         txt = _event_line(ev)
         if event_key(ev) in conflict_keys:
             if HAS_RICH:
@@ -817,7 +971,8 @@ def _flow_agenda(events: list[dict[str, Any]]) -> None:
             return f"! {txt}"
         return txt
 
-    # --- group by date ---
+    # Step 2: Group all events by date (YYYY-MM-DD)
+
     by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for ev in events:
         d = _safe_str(ev.get("date")).strip()
@@ -825,18 +980,23 @@ def _flow_agenda(events: list[dict[str, Any]]) -> None:
             by_date[d].append(ev)
 
     def weekday_short(d: date) -> str:
+        """Return short weekday label used in output."""
         names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         return names[d.weekday()]
 
     def parse_date(s: str) -> Optional[date]:
+        """Parse ISO date string (YYYY-MM-DD). Returns None if invalid."""
         try:
             return datetime.strptime(s, "%Y-%m-%d").date()
         except Exception:
             return None
 
     def week_key(d: date) -> tuple[int, int]:
+        """Return ISO (year, week) tuple used for grouping weeks."""
         iso = d.isocalendar()
         return (iso.year, iso.week)
+
+    # Step 3: Build mapping: ISO week → list of date strings
 
     # sort all dates
     sorted_dates = sorted(by_date.keys())
@@ -854,7 +1014,8 @@ def _flow_agenda(events: list[dict[str, Any]]) -> None:
     # UX params
     WEEKS_PER_PAGE = 4
 
-    # legend
+    ## Step 4: Show legend if conflicts exist
+
     if conflict_keys:
         if HAS_RICH:
             _println("Legend: [red]CONFLICT[/] = overlaps detected")
@@ -866,6 +1027,8 @@ def _flow_agenda(events: list[dict[str, Any]]) -> None:
     if mode == "0":
         return
     show_all = mode == "a"
+
+    # Step 5: Render weeks (paged or full list)
 
     idx = 0
     while idx < len(weeks):
@@ -907,25 +1070,35 @@ def _flow_agenda(events: list[dict[str, Any]]) -> None:
             return
 
 
-#    9.6) Agenda (Paged / All)
+#    9.6) Timetable (Week View)
 
 
 def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
+    """
+    Interactive weekly timetable view.
+
+    Lets the user select a specific ISO calendar week and displays the schedule
+    in a compact weekday table (Mon–Sat). Conflicting events within the week
+    are highlighted.
+    """
     if not events:
         _println("No selected events.")
         return
 
     def parse_date(s: str) -> Optional[date]:
+        """Parse ISO date string (YYYY-MM-DD). Returns None if invalid."""
         try:
             return datetime.strptime(s, "%Y-%m-%d").date()
         except Exception:
             return None
 
     def week_key(d: date) -> tuple[int, int]:
+        """Return short weekday label used for table columns."""
         iso = d.isocalendar()
         return (iso.year, iso.week)
 
     def weekday_short(d: date) -> str:
+        """Return readable label for an ISO week (Monday → Sunday)."""
         names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         return names[d.weekday()]
 
@@ -935,7 +1108,8 @@ def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
         sun = mon + timedelta(days=6)
         return f"{y}-W{w:02d} ({mon.isoformat()} → {sun.isoformat()})"
 
-    # collect all valid dates
+    # Step 1: Collect all valid dates and determine available weeks
+
     dates: list[date] = []
     for ev in events:
         dd = parse_date(_safe_str(ev.get("date")))
@@ -948,7 +1122,8 @@ def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
 
     weeks = sorted({week_key(d) for d in dates})
 
-    # Loop so user can view multiple weeks without re-entering menu
+    # Step 2: Main loop – allow inspecting multiple weeks
+
     while True:
 
         _println("\nAvailable weeks:")
@@ -983,7 +1158,8 @@ def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
         else:
             y, w = weeks[0]
 
-        # filter events for this week
+        # Step 3: Filter events for the selected week
+
         week_events: list[dict[str, Any]] = []
         for ev in events:
             dd = parse_date(_safe_str(ev.get("date")))
@@ -994,11 +1170,15 @@ def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
             _println("No events in that week.")
             continue
 
-        # detect conflicts within that week (mark conflict events)
+        # Step 4: Detect conflicts inside this week
+
         conf_pairs = find_conflicts(week_events)
 
         def event_key(ev: dict[str, Any]) -> tuple[str, str, str, str]:
-            # stable key, event_id may not exist everywhere
+            """
+            Stable event identifier for conflict marking.
+            Avoids relying on event_id which may not exist everywhere.
+            """
             return (
                 _safe_str(ev.get("date")),
                 _safe_str(ev.get("start")),
@@ -1012,6 +1192,7 @@ def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
             conflict_keys.add(event_key(b))
 
         def fmt_event(ev: dict[str, Any], rich: bool) -> str:
+            """Format event line and highlight if it is part of a conflict."""
             txt = _event_line(ev)
             if event_key(ev) in conflict_keys:
                 if rich and HAS_RICH:
@@ -1019,7 +1200,8 @@ def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
                 return f"! {txt}"  # plain fallback
             return txt
 
-        # bucket by weekday incl Saturday
+        # Step 5: Bucket events by weekday for table layout
+
         buckets = {name: [] for name in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]}
         for ev in sorted(week_events, key=lambda x: (_safe_str(x.get("date")), _safe_str(x.get("start")))):
             dd = parse_date(_safe_str(ev.get("date")))
@@ -1041,8 +1223,10 @@ def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
             else:
                 _println("Legend: ! = conflict (overlap)")
 
+        # Step 6: Render timetable (rich table or plain fallback)
+
         if HAS_RICH:
-            table = Table(box=box.SIMPLE)
+            table = Table(box=box.SIMPLE)  # type: ignore
             for day in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
                 table.add_column(day)
 
@@ -1053,7 +1237,7 @@ def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
                 return "\n\n".join(fmt_event(ev, rich=True) for ev in buckets[day])
 
             table.add_row(*(day_cell(d) for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]))
-            console.print(table)
+            console.print(table)  # type: ignore
 
         else:
             cols = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
@@ -1085,6 +1269,12 @@ def _flow_timetable_week(events: list[dict[str, Any]]) -> None:
 
 
 def _flow_export(events: list[dict[str, Any]]) -> None:
+    """
+    Export selected events to an iCalendar (.ics) file.
+
+    Guides the user through choosing an export location, ensures a valid
+    .ics filename, removes duplicate events, and writes the calendar file.
+    """
     if not events:
         _println("No selected events.")
         return
@@ -1103,7 +1293,11 @@ def _flow_export(events: list[dict[str, Any]]) -> None:
         # User can enter either:
         # - a filename (we put it into Downloads)
         # - or a full/relative path
-        user_path = _prompt("Enter file name or full path (e.g. my.ics or C:\\temp\\my.ics): ").strip()
+        user_path = _prompt("Enter file name or full path (e.g. my.ics or C:\\temp\\my.ics) (0 = back): ").strip()
+
+        if user_path == "0":
+            return
+
         if not user_path:
             out_path = default_path
         else:
@@ -1116,7 +1310,11 @@ def _flow_export(events: list[dict[str, Any]]) -> None:
                 out_path = p
     else:
         # default Downloads
-        out_in = _prompt(f"File name in Downloads [default: {default_name}]: ").strip()
+        out_in = _prompt(f"File name in Downloads [default: {default_name}] (0 = back): ").strip()
+
+        if out_in == "0":
+            return
+
         out_path = downloads / out_in if out_in else default_path
 
     # enforce .ics extension
@@ -1277,11 +1475,11 @@ def _run_scrape_subprocess(semester: str, refresh: bool) -> bool:
 
     try:
         if HAS_RICH:
-            progress = Progress(
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("{task.completed}/{task.total}"),
-                TimeRemainingColumn(),
+            progress = Progress(  # type: ignore
+                TextColumn("[progress.description]{task.description}"),  # type: ignore
+                BarColumn(),  # type: ignore
+                TextColumn("{task.completed}/{task.total}"),  # type: ignore
+                TimeRemainingColumn(),  # type: ignore
                 console=console,
             )
 
@@ -1305,7 +1503,7 @@ def _run_scrape_subprocess(semester: str, refresh: bool) -> bool:
                         done += 1
                         progress.update(task, completed=done)
 
-                    console.print(line)
+                    console.print(line)  # type: ignore
 
                 rc = proc.wait()
                 return rc == 0
@@ -1336,6 +1534,11 @@ def _run_scrape_subprocess(semester: str, refresh: bool) -> bool:
 
 
 def _run_parse_subprocess() -> bool:
+    """
+    Run the parser as a subprocess and stream its output live.
+
+    Returns True on exit code 0, else False. Ctrl+C stops the parser process.
+    """
     cmd = [sys.executable, "-u", "-m", "myschedule.parse"]
     proc = subprocess.Popen(
         cmd,

@@ -1,3 +1,15 @@
+"""
+Unit tests for parsing UniLU 'Termin/e' lines into structured events.
+
+The parser follows these rules:
+- Exactly one line produces at most one event
+- Invalid lines return None
+- Special markers modify event type:
+    * '(Prüfung)' -> kind='exam'
+    * 'Block'     -> kind='other'
+- Times are not normalized (e.g. '1015' is accepted)
+"""
+
 import unittest
 
 from myschedule.parse import parse_termin_line
@@ -22,6 +34,7 @@ class TestParseTerminLine(unittest.TestCase):
         self.assertEqual(ev["event_id"], "FS261110__2026-02-19T1015")
 
     def test_exam_line(self) -> None:
+        # '(Prüfung)' marker switches event type to exam
         line = "Fr, 20.03.2026, 09:15-11:15, HS 15 (Prüfung)"
         ev = parse_termin_line(line, "FS261671", "Classification Algorithms")
 
@@ -32,6 +45,7 @@ class TestParseTerminLine(unittest.TestCase):
         self.assertEqual(ev["note"], "Prüfung")
 
     def test_block_course_line(self) -> None:
+        # 'Block' marker switches event type to other
         line = "Mo, 01.06.2026, 08:15-17:00, 3.B01 Block"
         ev = parse_termin_line(line, "FS261999", "Block Seminar")
 
